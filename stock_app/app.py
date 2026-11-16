@@ -468,7 +468,7 @@ def live_dashboard() -> None:
             ret_b_p = ob["retail_buy_pct"]
             ret_s_p = 100.0 - ret_b_p
 
-st.markdown(
+            st.markdown(
                 f'<div class="ratio-card">'
                 f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>'
                 f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
@@ -482,7 +482,7 @@ st.markdown(
                 unsafe_allow_html=True,
             )
 
-with ob_col2:
+        with ob_col2:
             rows_ob = []
             for idx in range(5):
                 bp = f"{ob['bid_prices'][idx]:,.2f}" if idx < len(ob["bid_prices"]) else "—"
@@ -491,7 +491,7 @@ with ob_col2:
                 av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
                 rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
             st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
-else:
+    else:
         st.caption(f"目前為非盤中時段，{selected_label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
 
     st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
