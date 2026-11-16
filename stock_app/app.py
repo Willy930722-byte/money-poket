@@ -468,39 +468,19 @@ def live_dashboard() -> None:
             ret_b_p = ob["retail_buy_pct"]
             ret_s_p = 100.0 - ret_b_p
 
-            st.markdown(f"""
-            <div class="ratio-card">
-                <div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>
-                <div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>
-
-                <div style="display:flex;justify-content:space-between;font-size:13px;">
-                    <span class="pos">整體委買：{ob['total_bid']:,.0f} 張（{buy_p:.1f}%）</span>
-                    <span class="neg">整體委賣：{ob['total_ask']:,.0f} 張（{sell_p:.1f}%）</span>
-                </div>
-                <div class="ratio-bar-wrap">
-                    <div style="width:{buy_p:.1f}%;background:#ff6474;"></div>
-                    <div style="width:{sell_p:.1f}%;background:#43d6a0;"></div>
-                </div>
-
-                <div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;">
-                    <span><b>大戶大單</b>｜買 <span class="pos">{ob['big_buy_vol']:,.0f} 張（{big_b_p:.1f}%）</span></span>
-                    <span>賣 <span class="neg">{ob['big_sell_vol']:,.0f} 張（{big_s_p:.1f}%）</span></span>
-                </div>
-                <div class="ratio-bar-wrap">
-                    <div style="width:{big_b_p:.1f}%;background:#ff6474;"></div>
-                    <div style="width:{big_s_p:.1f}%;background:#43d6a0;"></div>
-                </div>
-
-                <div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;">
-                    <span><b>散戶小單</b>｜買 <span class="pos">{ob['retail_buy_vol']:,.0f} 張（{ret_b_p:.1f}%）</span></span>
-                    <span>賣 <span class="neg">{ob['retail_sell_vol']:,.0f} 張（{ret_s_p:.1f}%）</span></span>
-                </div>
-                <div class="ratio-bar-wrap">
-                    <div style="width:{ret_b_p:.1f}%;background:#ff6474;"></div>
-                    <div style="width:{ret_s_p:.1f}%;background:#43d6a0;"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+           st.markdown(
+                f'<div class="ratio-card">'
+                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>'
+                f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;"><span class="pos">整體委買：{ob["total_bid"]:,.0f} 張（{buy_p:.1f}%）</span><span class="neg">整體委賣：{ob["total_ask"]:,.0f} 張（{sell_p:.1f}%）</span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{buy_p:.1f}%;background:#ff6474;"></div><div style="width:{sell_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>大戶大單</b>｜買 <span class="pos">{ob["big_buy_vol"]:,.0f} 張（{big_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["big_sell_vol"]:,.0f} 張（{big_s_p:.1f}%）</span></span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{big_b_p:.1f}%;background:#ff6474;"></div><div style="width:{big_s_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>散戶小單</b>｜買 <span class="pos">{ob["retail_buy_vol"]:,.0f} 張（{ret_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["retail_sell_vol"]:,.0f} 張（{ret_s_p:.1f}%）</span></span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{ret_b_p:.1f}%;background:#ff6474;"></div><div style="width:{ret_s_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         with ob_col2:
             rows_ob = []
