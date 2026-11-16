@@ -11,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -87,6 +88,49 @@ def decode_portfolio(token: str) -> dict[str, dict[str, Any]] | None:
         return None
 
 
+def sync_browser_storage(token: str | None) -> None:
+    if token is None:
+        js = """
+        <script>
+        try {
+            const url = new URL(window.parent.location.href);
+            const urlP = url.searchParams.get('p');
+            const savedP = window.parent.localStorage.getItem('tw_stock_portfolio_p');
+            if (!urlP && savedP) {
+                url.searchParams.set('p', savedP);
+                window.parent.location.replace(url.toString());
+            } else if (urlP && urlP !== savedP) {
+                window.parent.localStorage.setItem('tw_stock_portfolio_p', urlP);
+            }
+        } catch (e) {}
+        </script>
+        """
+    elif token == "":
+        js = """
+        <script>
+        try {
+            window.parent.localStorage.removeItem('tw_stock_portfolio_p');
+            const url = new URL(window.parent.location.href);
+            url.searchParams.delete('p');
+            window.parent.history.replaceState({}, '', url.toString());
+        } catch (e) {}
+        </script>
+        """
+    else:
+        safe_token = json.dumps(token)
+        js = f"""
+        <script>
+        try {{
+            window.parent.localStorage.setItem('tw_stock_portfolio_p', {safe_token});
+            const url = new URL(window.parent.location.href);
+            url.searchParams.set('p', {safe_token});
+            window.parent.history.replaceState({{}}, '', url.toString());
+        }} catch (e) {{}}
+        </script>
+        """
+    components.html(js, height=0)
+
+
 def load_portfolio() -> dict[str, dict[str, Any]]:
     if "user_portfolio" not in st.session_state:
         token = st.query_params.get("p", "")
@@ -103,9 +147,13 @@ def save_portfolio(data: dict[str, dict[str, Any]], sync_url: bool = True) -> No
     st.session_state["user_portfolio"] = data
     if sync_url:
         if data:
-            st.query_params["p"] = encode_portfolio(data)
-        elif "p" in st.query_params:
-            del st.query_params["p"]
+            token = encode_portfolio(data)
+            st.query_params["p"] = token
+            st.session_state["pending_storage_sync"] = token
+        else:
+            if "p" in st.query_params:
+                del st.query_params["p"]
+            st.session_state["pending_storage_sync"] = ""
 
 
 def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -410,6 +458,8 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
 
 
 portfolio = load_portfolio()
+pending_sync = st.session_state.pop("pending_storage_sync", None)
+sync_browser_storage(pending_sync)
 
 with st.sidebar:
     st.markdown('<div class="eyebrow">PORTFOLIO CONTROL</div><div class="section-title">個人專屬持股管理</div>', unsafe_allow_html=True)
@@ -436,12 +486,12 @@ with st.sidebar:
             else:
                 portfolio[code] = {"avg_cost": float(avg_cost), "shares": int(shares), "name": auto_name}
             save_portfolio(portfolio, sync_url=True)
-            st.success(f"{code}（{portfolio[code]['name']}）已儲存至你的專屬書籤網址。")
+            st.success(f"{code}（{portfolio[code]['name']}）已自動記憶在此裝置。")
             st.rerun()
 
     st.markdown("<hr style='border-color:#243244'>", unsafe_allow_html=True)
     if portfolio:
-        st.markdown(f"<div class='subtle'>目前追蹤 {len(portfolio)} 檔（僅限你本人視窗可見）</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>目前追蹤 {len(portfolio)} 檔（已自動記憶於此裝置）</div>", unsafe_allow_html=True)
         for code, item in list(portfolio.items()):
             c1, c2 = st.columns([4, 1])
             label_name = item.get("name", "")
@@ -466,10 +516,10 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("<hr style='border-color:#243244'>", unsafe_allow_html=True)
-    st.caption("隱私提示：所有持股僅存在你目前的瀏覽器與專屬網址中，不會存入共用伺服器。新增持股後請將「目前瀏覽器網址」加入書籤，下次開啟即可直接還原；若要分享給朋友，請分享不含 ?p= 參數的主網址。")
+    st.caption("本機記憶說明：持股會自動儲存在目前手機或電腦瀏覽器的本機空間，重開 App 也會自動載入；傳送不含 ?p= 的主網址給朋友時，對方只會看到預設範例。")
 
 st.markdown("""
-<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">獨立隔離版 · 任意查股</div></div>
+<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">裝置自動記憶 · 任意查股</div></div>
 """, unsafe_allow_html=True)
 
 controls1, controls2, controls3 = st.columns([1.3, 2, 2.3])
@@ -478,7 +528,7 @@ with controls1:
 with controls2:
     frequency = st.slider("更新頻率（秒）", min_value=5, max_value=30, value=10, step=1, disabled=not auto_refresh)
 with controls3:
-    st.markdown("<div class='subtle' style='padding-top:30px'>訪客資料完全隔離；更新持股後將目前網址加入書籤即可永久保存。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtle' style='padding-top:30px'>持股自動儲存在本機裝置中，關閉重開免重新輸入。</div>", unsafe_allow_html=True)
 
 
 @st.fragment(run_every=frequency if auto_refresh else None)
