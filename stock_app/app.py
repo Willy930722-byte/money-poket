@@ -524,7 +524,7 @@ st.markdown("""
 
 controls1, controls2, controls3 = st.columns([1.3, 2, 2.3])
 with controls1:
-    auto_refresh = st.toggle("啟動即時自動更新", value=False)
+    auto_refresh = st.toggle("啟動即時自動更新", value=True)
 with controls2:
     frequency = st.slider("更新頻率（秒）", min_value=5, max_value=30, value=10, step=1, disabled=not auto_refresh)
 with controls3:
