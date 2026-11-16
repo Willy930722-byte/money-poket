@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 import time
+import zlib
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -11,8 +12,6 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-APP_DIR = Path(__file__).resolve().parent
-PORTFOLIO_FILE = APP_DIR / "portfolio.json"
 API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -57,25 +56,53 @@ if "intraday_history" not in st.session_state:
     st.session_state["intraday_history"] = {}
 
 
-def load_portfolio() -> dict[str, dict[str, Any]]:
-    if not PORTFOLIO_FILE.exists():
-        if DEFAULT_PORTFOLIO:
-            save_portfolio(DEFAULT_PORTFOLIO)
-            return json.loads(json.dumps(DEFAULT_PORTFOLIO))
-        return {}
+def encode_portfolio(data: dict[str, dict[str, Any]]) -> str:
+    compact = {
+        k: [round(float(v["avg_cost"]), 4), int(v["shares"]), str(v.get("name", ""))]
+        for k, v in data.items()
+    }
+    raw = json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(zlib.compress(raw)).decode("ascii")
+
+
+def decode_portfolio(token: str) -> dict[str, dict[str, Any]] | None:
     try:
-        data = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        st.error("portfolio.json 無法讀取，已暫時載入預設持股。")
-        return json.loads(json.dumps(DEFAULT_PORTFOLIO))
+        raw = zlib.decompress(base64.urlsafe_b64decode(token.encode("ascii")))
+        compact = json.loads(raw.decode("utf-8"))
+        if not isinstance(compact, dict):
+            return None
+        restored: dict[str, dict[str, Any]] = {}
+        for k, vals in compact.items():
+            if isinstance(vals, list) and len(vals) >= 2:
+                restored[str(k)] = {
+                    "avg_cost": float(vals[0]),
+                    "shares": int(vals[1]),
+                    "name": str(vals[2]) if len(vals) >= 3 and vals[2] else str(k),
+                }
+        return restored
+    except Exception:
+        return None
 
 
-def save_portfolio(data: dict[str, dict[str, Any]]) -> None:
-    PORTFOLIO_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = PORTFOLIO_FILE.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(PORTFOLIO_FILE)
+def load_portfolio() -> dict[str, dict[str, Any]]:
+    if "user_portfolio" not in st.session_state:
+        token = st.query_params.get("p", "")
+        if token:
+            decoded = decode_portfolio(token)
+            if decoded is not None:
+                st.session_state["user_portfolio"] = decoded
+                return st.session_state["user_portfolio"]
+        st.session_state["user_portfolio"] = json.loads(json.dumps(DEFAULT_PORTFOLIO))
+    return st.session_state["user_portfolio"]
+
+
+def save_portfolio(data: dict[str, dict[str, Any]], sync_url: bool = True) -> None:
+    st.session_state["user_portfolio"] = data
+    if sync_url:
+        if data:
+            st.query_params["p"] = encode_portfolio(data)
+        elif "p" in st.query_params:
+            del st.query_params["p"]
 
 
 def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -246,7 +273,7 @@ def make_rows(portfolio: dict[str, dict[str, Any]], quotes: dict[str, dict[str, 
 
 
 def money(value: float) -> str:
-    return f"NT$ {value:,.0f}"
+    return f"NT\$ {value:,.0f}"
 
 
 def metric_delta(value: float) -> str:
@@ -256,7 +283,7 @@ def metric_delta(value: float) -> str:
 portfolio = load_portfolio()
 
 with st.sidebar:
-    st.markdown('<div class="eyebrow">PORTFOLIO CONTROL</div><div class="section-title">持股管理</div>', unsafe_allow_html=True)
+    st.markdown('<div class="eyebrow">PORTFOLIO CONTROL</div><div class="section-title">個人專屬持股管理</div>', unsafe_allow_html=True)
     with st.form("add_holding", clear_on_submit=True):
         stock_code = st.text_input("股票代號", placeholder="例如 2330", max_chars=6, help="輸入上市或上櫃股票代號，系統會自動抓取股票名稱與行情。")
         avg_cost = st.number_input("買進均價（元）", min_value=0.01, value=100.0, step=0.5, format="%.2f")
@@ -279,13 +306,13 @@ with st.sidebar:
                 }
             else:
                 portfolio[code] = {"avg_cost": float(avg_cost), "shares": int(shares), "name": auto_name}
-            save_portfolio(portfolio)
-            st.success(f"{code}（{portfolio[code]['name']}）持股已儲存。")
+            save_portfolio(portfolio, sync_url=True)
+            st.success(f"{code}（{portfolio[code]['name']}）已儲存至你的專屬書籤網址。")
             st.rerun()
 
     st.markdown("<hr style='border-color:#243244'>", unsafe_allow_html=True)
     if portfolio:
-        st.markdown(f"<div class='subtle'>目前追蹤 {len(portfolio)} 檔</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='subtle'>目前追蹤 {len(portfolio)} 檔（僅限你本人視窗可見）</div>", unsafe_allow_html=True)
         for code, item in list(portfolio.items()):
             c1, c2 = st.columns([4, 1])
             label_name = item.get("name", "")
@@ -293,24 +320,27 @@ with st.sidebar:
             c1.markdown(f"**{title_str}**<br><span class='subtle'>{int(item['shares']):,} 股 · 均價 {float(item['avg_cost']):,.2f}</span>", unsafe_allow_html=True)
             if c2.button("移除", key=f"del_{code}", help=f"刪除 {code}"):
                 portfolio.pop(code, None)
-                save_portfolio(portfolio)
+                save_portfolio(portfolio, sync_url=True)
                 st.rerun()
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         col_reset1, col_reset2 = st.columns(2)
-        if col_reset1.button("還原預設持股", use_container_width=True):
-            save_portfolio(DEFAULT_PORTFOLIO)
+        if col_reset1.button("還原預設範例", use_container_width=True):
+            save_portfolio(json.loads(json.dumps(DEFAULT_PORTFOLIO)), sync_url=True)
             st.rerun()
         if col_reset2.button("清空全部", use_container_width=True):
-            save_portfolio({})
+            save_portfolio({}, sync_url=True)
             st.rerun()
     else:
         st.caption("尚未新增持股。")
-        if DEFAULT_PORTFOLIO and st.button("載入預設核心持股", use_container_width=True):
-            save_portfolio(DEFAULT_PORTFOLIO)
+        if DEFAULT_PORTFOLIO and st.button("載入預設範例持股", use_container_width=True):
+            save_portfolio(json.loads(json.dumps(DEFAULT_PORTFOLIO)), sync_url=True)
             st.rerun()
 
+    st.markdown("<hr style='border-color:#243244'>", unsafe_allow_html=True)
+    st.caption("隱私提示：所有持股僅存在你目前的瀏覽器與專屬網址中，不會存入共用伺服器。新增持股後請將「目前瀏覽器網址」加入書籤，下次開啟即可直接還原；若要分享給朋友，請分享不含 ?p= 參數的主網址。")
+
 st.markdown("""
-<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · LIVE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">TWSE / TPEx · 雲端即時版</div></div>
+<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">獨立隔離版 · 隱私保護</div></div>
 """, unsafe_allow_html=True)
 
 controls1, controls2, controls3 = st.columns([1.3, 2, 2.3])
@@ -319,7 +349,7 @@ with controls1:
 with controls2:
     frequency = st.slider("更新頻率（秒）", min_value=5, max_value=30, value=10, step=1, disabled=not auto_refresh)
 with controls3:
-    st.markdown("<div class='subtle' style='padding-top:30px'>啟用後定時更新報價；若雲端重啟會自動載入預設核心持股。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtle' style='padding-top:30px'>訪客資料完全隔離；更新持股後將目前網址加入書籤即可永久保存。</div>", unsafe_allow_html=True)
 
 
 @st.fragment(run_every=frequency if auto_refresh else None)
@@ -345,7 +375,7 @@ def live_dashboard() -> None:
                 if len(hist) > 300:
                     hist.pop(0)
     if updated_name:
-        save_portfolio(current)
+        save_portfolio(current, sync_url=False)
 
     if errors:
         for error in errors:
@@ -439,110 +469,4 @@ def live_dashboard() -> None:
             y_min = min(float(hist_df["收盤"].min()), sel_cost) * 0.985
             y_max = max(float(hist_df["收盤"].max()), sel_cost) * 1.015
 
-        fig_chart.add_hline(
-            y=sel_cost, line_dash="dash", line_color="#68d5e8", line_width=2,
-            annotation_text=f"買進均價成本：{sel_cost:,.2f}",
-            annotation_position="top left",
-            annotation_font=dict(color="#68d5e8", size=12),
-        )
-        fig_chart.update_layout(
-            height=360, margin=dict(l=16, r=16, t=24, b=16),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
-            font=dict(color="#edf3fa", family="Noto Sans TC"),
-            xaxis=dict(showgrid=False, linecolor="#243244", rangeslider=dict(visible=False)),
-            yaxis=dict(range=[y_min, y_max], gridcolor="#1d2b3a", tickformat=",.2f"),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_chart, use_container_width=True)
-    else:
-        st.info(f"目前暫無 {selected_label} 的圖表資料（可能為非交易時段或該代號暫無連線數據）。")
-
-    ob = parse_order_book(quotes.get(sel_code, {}))
-    if ob["has_data"]:
-        ob_col1, ob_col2 = st.columns([1.35, 1])
-        with ob_col1:
-            buy_p = ob["buy_pct"]
-            sell_p = ob["sell_pct"]
-            big_b_p = ob["big_buy_pct"]
-            big_s_p = 100.0 - big_b_p
-            ret_b_p = ob["retail_buy_pct"]
-            ret_s_p = 100.0 - ret_b_p
-
-            st.markdown(
-                f'<div class="ratio-card">'
-                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>'
-                f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;"><span class="pos">整體委買：{ob["total_bid"]:,.0f} 張（{buy_p:.1f}%）</span><span class="neg">整體委賣：{ob["total_ask"]:,.0f} 張（{sell_p:.1f}%）</span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{buy_p:.1f}%;background:#ff6474;"></div><div style="width:{sell_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>大戶大單</b>｜買 <span class="pos">{ob["big_buy_vol"]:,.0f} 張（{big_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["big_sell_vol"]:,.0f} 張（{big_s_p:.1f}%）</span></span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{big_b_p:.1f}%;background:#ff6474;"></div><div style="width:{big_s_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>散戶小單</b>｜買 <span class="pos">{ob["retail_buy_vol"]:,.0f} 張（{ret_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["retail_sell_vol"]:,.0f} 張（{ret_s_p:.1f}%）</span></span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{ret_b_p:.1f}%;background:#ff6474;"></div><div style="width:{ret_s_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-        with ob_col2:
-            rows_ob = []
-            for idx in range(5):
-                bp = f"{ob['bid_prices'][idx]:,.2f}" if idx < len(ob["bid_prices"]) else "—"
-                bv = f"{ob['bid_vols'][idx]:,.0f}" if idx < len(ob["bid_vols"]) else "—"
-                ap = f"{ob['ask_prices'][idx]:,.2f}" if idx < len(ob["ask_prices"]) else "—"
-                av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
-                rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
-            st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
-    else:
-        st.caption(f"目前為非盤中時段，{selected_label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
-
-    st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>投資組合資金配置與損益分佈</div>", unsafe_allow_html=True)
-    viz1, viz2 = st.columns(2)
-    valid_viz = df[df["市值"].notna() & (df["市值"] > 0)].copy()
-    if not valid_viz.empty:
-        valid_viz["標籤"] = valid_viz["股票代號"] + " " + valid_viz["股票名稱"]
-        with viz1:
-            fig_pie = go.Figure(data=[go.Pie(
-                labels=valid_viz["標籤"], values=valid_viz["市值"], hole=0.48,
-                textinfo="label+percent",
-                marker=dict(line=dict(color="#080e16", width=2)),
-            )])
-            fig_pie.update_layout(
-                title=dict(text="各檔持股資金佔比（依市值）", font=dict(size=14, color="#9aabbc")),
-                height=320, margin=dict(l=12, r=12, t=40, b=12),
-                paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#edf3fa", family="Noto Sans TC"),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        with viz2:
-            pnl_sorted = valid_viz.sort_values("未實現損益（元）", ascending=True)
-            bar_colors = ["#ff6474" if v >= 0 else "#43d6a0" for v in pnl_sorted["未實現損益（元）"]]
-            fig_bar = go.Figure(data=[go.Bar(
-                x=pnl_sorted["未實現損益（元）"], y=pnl_sorted["標籤"],
-                orientation="h", marker_color=bar_colors,
-                text=[f"{v:+,.0f} 元" for v in pnl_sorted["未實現損益（元）"]],
-                textposition="auto",
-            )])
-            fig_bar.update_layout(
-                title=dict(text="各檔未實現損益排行（已扣估算成本）", font=dict(size=14, color="#9aabbc")),
-                height=320, margin=dict(l=12, r=12, t=40, b=12),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
-                font=dict(color="#edf3fa", family="Noto Sans TC"),
-                xaxis=dict(gridcolor="#1d2b3a", zerolinecolor="#8493a6"),
-                yaxis=dict(showgrid=False),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-    with st.expander("交易成本與計算說明"):
-        st.markdown("買進手續費 = 買進均價 × 股數 × 0.1425%，最低 NT$20；賣出手續費 = 最新成交價 × 股數 × 0.1425%，最低 NT$20；證交稅 = 最新成交市值 × 0.3%。未實現損益 = 市值 − 買進金額 − 買進手續費 − 預估賣出手續費 − 證交稅。費用以元為單位四捨五入。")
-        st.caption("提醒：交易稅率與手續費折扣可能依商品、交易方式或券商而異。此處依普通股票費率估算，非券商正式對帳數字。")
-        cost_view = df[["股票代號", "股票名稱", "買進手續費", "預估賣出手續費", "證交稅"]].copy()
-        st.dataframe(cost_view.style.format({"買進手續費": "{:,.0f}", "預估賣出手續費": "{:,.0f}", "證交稅": "{:,.0f}"}), use_container_width=True, hide_index=True)
-
-    unavailable = [code for code in current if code not in quotes or (number(quotes.get(code, {}).get("z")) is None and number(quotes.get(code, {}).get("y")) is None)]
-    if unavailable:
-        st.caption("暫無有效成交報價：" + "、".join(unavailable) + "。可能原因為非交易時段、代號不存在或來源尚未提供成交資料。")
-
-
-live_dashboard()
-st.markdown("<div class='subtle' style='text-align:center;margin:28px 0 8px'>行情由 TWSE MIS 與公開圖表介面提供 · 本工具不提供投資建議</div>", unsafe_allow_html=True)
+        fig_chart.
