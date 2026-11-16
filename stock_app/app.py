@@ -491,7 +491,7 @@ with ob_col2:
                 av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
                 rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
             st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
-    else:
+else:
         st.caption(f"目前為非盤中時段，{selected_label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
 
     st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
