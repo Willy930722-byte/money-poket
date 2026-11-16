@@ -482,7 +482,7 @@ st.markdown(
                 unsafe_allow_html=True,
             )
 
-        with ob_col2:
+with ob_col2:
             rows_ob = []
             for idx in range(5):
                 bp = f"{ob['bid_prices'][idx]:,.2f}" if idx < len(ob["bid_prices"]) else "—"
