@@ -46,6 +46,7 @@ st.markdown("""
 .pos {color:var(--red)!important;font-weight:700;} .neg {color:var(--green)!important;font-weight:700;} .flat {color:#abb5c0!important;}
 .ratio-card {background:#0e1722;border:1px solid #243244;border-radius:12px;padding:16px 18px;margin-bottom:12px;}
 .ratio-bar-wrap {display:flex;height:14px;border-radius:99px;overflow:hidden;background:#1a2634;margin:10px 0;}
+.quote-banner {background:linear-gradient(145deg,#122030,#0d1620);border:1px solid #26384d;border-radius:12px;padding:14px 18px;margin:10px 0 14px;display:flex;flex-wrap:wrap;gap:24px;align-items:center;}
 div[data-testid="stDataFrame"] {border:1px solid var(--line);border-radius:12px;overflow:hidden;}
 .stButton>button {border-radius:9px;} .stTextInput input,.stNumberInput input {background:#0d1722;}
 footer {visibility:hidden;}
@@ -54,6 +55,8 @@ footer {visibility:hidden;}
 
 if "intraday_history" not in st.session_state:
     st.session_state["intraday_history"] = {}
+if "quick_lookup_code" not in st.session_state:
+    st.session_state["quick_lookup_code"] = ""
 
 
 def encode_portfolio(data: dict[str, dict[str, Any]]) -> str:
@@ -106,9 +109,10 @@ def save_portfolio(data: dict[str, dict[str, Any]], sync_url: bool = True) -> No
 
 
 def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    if not codes:
+    unique_codes = list(dict.fromkeys(c for c in codes if c))
+    if not unique_codes:
         return {}, []
-    symbols = "|".join(f"{market}_{code}.tw" for code in codes for market in ("tse", "otc"))
+    symbols = "|".join(f"{market}_{code}.tw" for code in unique_codes for market in ("tse", "otc"))
     params = {"ex_ch": symbols, "json": "1", "delay": "0"}
     headers = {"User-Agent": USER_AGENT, "Referer": "https://mis.twse.com.tw/stock/fibest.jsp", "Accept": "application/json, text/plain, */*"}
     last_error = "行情服務暫時無法連線"
@@ -280,6 +284,131 @@ def metric_delta(value: float) -> str:
     return f"{value:+,.2f}%"
 
 
+def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_price: float | None, chart_mode: str) -> None:
+    price = number(quote.get("z")) or number(quote.get("y")) or number(quote.get("pz"))
+    prev = number(quote.get("y"))
+    high_p = number(quote.get("h"))
+    low_p = number(quote.get("l"))
+    vol_shares = number(quote.get("v"))
+
+    if price is not None:
+        delta = price - prev if prev is not None else 0.0
+        pct = (delta / prev * 100) if prev else 0.0
+        cls = "pos" if delta > 0 else ("neg" if delta < 0 else "flat")
+        sign = "+" if delta > 0 else ""
+        high_str = f"{high_p:,.2f}" if high_p is not None else "—"
+        low_str = f"{low_p:,.2f}" if low_p is not None else "—"
+        vol_str = f"{vol_shares:,.0f} 張" if vol_shares is not None else "—"
+        st.markdown(
+            f'<div class="quote-banner">'
+            f'<div><div class="subtle">個股即時報價</div><div style="font-size:20px;font-weight:800;">{label}</div></div>'
+            f'<div><div class="subtle">成交價</div><div class="{cls}" style="font-size:22px;font-family:\'DM Mono\',monospace;">{price:,.2f}</div></div>'
+            f'<div><div class="subtle">漲跌 / 幅度</div><div class="{cls}" style="font-size:16px;font-family:\'DM Mono\',monospace;">{sign}{delta:,.2f}（{sign}{pct:.2f}%）</div></div>'
+            f'<div><div class="subtle">最高 / 最低</div><div style="font-size:15px;font-family:\'DM Mono\',monospace;">{high_str} / {low_str}</div></div>'
+            f'<div><div class="subtle">成交量</div><div style="font-size:15px;font-family:\'DM Mono\',monospace;">{vol_str}</div></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    hist_df = fetch_chart_history(code, chart_mode)
+    if hist_df.empty and chart_mode == "當日盤中走勢":
+        local_hist = st.session_state["intraday_history"].get(code, [])
+        if local_hist:
+            hist_df = pd.DataFrame(local_hist)
+
+    if not hist_df.empty:
+        fig_chart = go.Figure()
+        if chart_mode == "近 30 日 K 線圖" and {"開盤", "最高", "最低", "收盤"}.issubset(hist_df.columns):
+            fig_chart.add_trace(go.Candlestick(
+                x=hist_df["時間"],
+                open=hist_df["開盤"],
+                high=hist_df["最高"],
+                low=hist_df["最低"],
+                close=hist_df["收盤"],
+                name=label,
+                increasing=dict(line=dict(color="#ff6474"), fillcolor="#ff6474"),
+                decreasing=dict(line=dict(color="#43d6a0"), fillcolor="#43d6a0"),
+            ))
+            raw_min = float(hist_df["最低"].min())
+            raw_max = float(hist_df["最高"].max())
+        else:
+            latest_val = float(hist_df["收盤"].iloc[-1])
+            ref_val = cost_price if cost_price is not None else float(hist_df["收盤"].iloc[0])
+            line_color = "#ff6474" if latest_val >= ref_val else "#43d6a0"
+            fig_chart.add_trace(go.Scatter(
+                x=hist_df["時間"], y=hist_df["收盤"],
+                mode="lines+markers", name="股價走勢",
+                line=dict(color=line_color, width=2.5),
+                marker=dict(size=5),
+                fill="tozeroy",
+                fillcolor="rgba(255,100,116,0.08)" if latest_val >= ref_val else "rgba(67,214,160,0.08)",
+            ))
+            raw_min = float(hist_df["收盤"].min())
+            raw_max = float(hist_df["收盤"].max())
+
+        if cost_price is not None:
+            y_min = min(raw_min, cost_price) * 0.985
+            y_max = max(raw_max, cost_price) * 1.015
+            fig_chart.add_hline(
+                y=cost_price, line_dash="dash", line_color="#68d5e8", line_width=2,
+                annotation_text=f"買進均價成本：{cost_price:,.2f}",
+                annotation_position="top left",
+                annotation_font=dict(color="#68d5e8", size=12),
+            )
+        else:
+            y_min = raw_min * 0.985
+            y_max = raw_max * 1.015
+
+        fig_chart.update_layout(
+            height=360, margin=dict(l=16, r=16, t=24, b=16),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
+            font=dict(color="#edf3fa", family="Noto Sans TC"),
+            xaxis=dict(showgrid=False, linecolor="#243244", rangeslider=dict(visible=False)),
+            yaxis=dict(range=[y_min, y_max], gridcolor="#1d2b3a", tickformat=",.2f"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_chart, use_container_width=True)
+    else:
+        st.info(f"目前暫無 {label} 的圖表資料（可能為非交易時段或該代號暫無連線數據）。")
+
+    ob = parse_order_book(quote)
+    if ob["has_data"]:
+        ob_col1, ob_col2 = st.columns([1.35, 1])
+        with ob_col1:
+            buy_p = ob["buy_pct"]
+            sell_p = ob["sell_pct"]
+            big_b_p = ob["big_buy_pct"]
+            big_s_p = 100.0 - big_b_p
+            ret_b_p = ob["retail_buy_pct"]
+            ret_s_p = 100.0 - ret_b_p
+
+            st.markdown(
+                f'<div class="ratio-card">'
+                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{label} · 即時大戶／散戶買賣比例推估</div>'
+                f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;"><span class="pos">整體委買：{ob["total_bid"]:,.0f} 張（{buy_p:.1f}%）</span><span class="neg">整體委賣：{ob["total_ask"]:,.0f} 張（{sell_p:.1f}%）</span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{buy_p:.1f}%;background:#ff6474;"></div><div style="width:{sell_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>大戶大單</b>｜買 <span class="pos">{ob["big_buy_vol"]:,.0f} 張（{big_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["big_sell_vol"]:,.0f} 張（{big_s_p:.1f}%）</span></span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{big_b_p:.1f}%;background:#ff6474;"></div><div style="width:{big_s_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>散戶小單</b>｜買 <span class="pos">{ob["retail_buy_vol"]:,.0f} 張（{ret_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["retail_sell_vol"]:,.0f} 張（{ret_s_p:.1f}%）</span></span></div>'
+                f'<div class="ratio-bar-wrap"><div style="width:{ret_b_p:.1f}%;background:#ff6474;"></div><div style="width:{ret_s_p:.1f}%;background:#43d6a0;"></div></div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        with ob_col2:
+            rows_ob = []
+            for idx in range(5):
+                bp = f"{ob['bid_prices'][idx]:,.2f}" if idx < len(ob["bid_prices"]) else "—"
+                bv = f"{ob['bid_vols'][idx]:,.0f}" if idx < len(ob["bid_vols"]) else "—"
+                ap = f"{ob['ask_prices'][idx]:,.2f}" if idx < len(ob["ask_prices"]) else "—"
+                av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
+                rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
+            st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
+    else:
+        st.caption(f"目前為非盤中時段，{label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
+
+
 portfolio = load_portfolio()
 
 with st.sidebar:
@@ -340,7 +469,7 @@ with st.sidebar:
     st.caption("隱私提示：所有持股僅存在你目前的瀏覽器與專屬網址中，不會存入共用伺服器。新增持股後請將「目前瀏覽器網址」加入書籤，下次開啟即可直接還原；若要分享給朋友，請分享不含 ?p= 參數的主網址。")
 
 st.markdown("""
-<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">獨立隔離版 · 隱私保護</div></div>
+<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">獨立隔離版 · 任意查股</div></div>
 """, unsafe_allow_html=True)
 
 controls1, controls2, controls3 = st.columns([1.3, 2, 2.3])
@@ -355,7 +484,9 @@ with controls3:
 @st.fragment(run_every=frequency if auto_refresh else None)
 def live_dashboard() -> None:
     current = load_portfolio()
-    quotes, errors = request_quotes(list(current.keys()))
+    lookup_code = st.session_state.get("quick_lookup_code", "").strip().upper()
+    query_codes = list(current.keys()) + ([lookup_code] if lookup_code else [])
+    quotes, errors = request_quotes(query_codes)
     now_dt = datetime.now().astimezone()
     now = now_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     time_short = now_dt.strftime("%H:%M:%S")
@@ -367,6 +498,8 @@ def live_dashboard() -> None:
         if fetched_name and holding.get("name") != fetched_name:
             current[code]["name"] = fetched_name
             updated_name = True
+    for code in query_codes:
+        q = quotes.get(code, {})
         live_p = number(q.get("z")) or number(q.get("y")) or number(q.get("pz"))
         if live_p is not None:
             hist = st.session_state["intraday_history"].setdefault(code, [])
@@ -382,192 +515,139 @@ def live_dashboard() -> None:
             st.warning(error)
     df = make_rows(current, quotes)
     st.markdown(f"<div class='subtle' style='text-align:right'>最後更新時間 {now}</div>", unsafe_allow_html=True)
-    if df.empty:
-        st.info("請從左側加入持股，開始追蹤即時行情與損益。")
-        return
 
-    valued = df[df["最新成交價"].notna()]
-    total_value = float(valued["市值"].sum())
-    total_cost = float(df["投入成本"].sum())
-    total_pnl = float(df["未實現損益（元）"].fillna(0).sum())
-    total_return = total_pnl / (total_cost + float(df["買進手續費"].sum())) * 100 if total_cost else 0
+    if not df.empty:
+        valued = df[df["最新成交價"].notna()]
+        total_value = float(valued["市值"].sum())
+        total_cost = float(df["投入成本"].sum())
+        total_pnl = float(df["未實現損益（元）"].fillna(0).sum())
+        total_return = total_pnl / (total_cost + float(df["買進手續費"].sum())) * 100 if total_cost else 0
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("總市值", money(total_value))
-    m2.metric("總投入成本", money(total_cost))
-    m3.metric("總未實現損益", money(total_pnl), delta=f"{total_pnl:+,.0f} 元", delta_color="inverse")
-    m4.metric("總報酬率", metric_delta(total_return), delta_color="inverse")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("總市值", money(total_value))
+        m2.metric("總投入成本", money(total_cost))
+        m3.metric("總未實現損益", money(total_pnl), delta=f"{total_pnl:+,.0f} 元", delta_color="inverse")
+        m4.metric("總報酬率", metric_delta(total_return), delta_color="inverse")
 
-    st.markdown("<div class='section-title'>持股即時行情與損益</div><div class='legend'><span class='pos'>紅色：上漲／獲利</span>  <span class='neg'>綠色：下跌／虧損</span>  <span class='flat'>灰色：平盤</span> · 損益已扣估算交易成本</div>", unsafe_allow_html=True)
-    display_cols = ["股票代號", "股票名稱", "最新成交價", "漲跌價差", "當日漲跌幅（%）", "買進均價", "持有股數", "未實現損益（元）", "個人報酬率（%）"]
-    view = df[display_cols].copy()
-    for col in ["最新成交價", "買進均價", "漲跌價差"]:
-        view[col] = view[col].map(lambda x: "—" if pd.isna(x) else f"{x:,.2f}")
-    for col in ["當日漲跌幅（%）", "個人報酬率（%）"]:
-        view[col] = view[col].map(lambda x: "—" if pd.isna(x) else f"{x:+.2f}%")
-    view["持有股數"] = view["持有股數"].map(lambda x: f"{x:,}")
-    view["未實現損益（元）"] = view["未實現損益（元）"].map(lambda x: "—" if pd.isna(x) else f"{x:+,.0f}")
-    st.dataframe(
-        view.style.map(
-            lambda x: "color: #ff6474; font-weight:700"
-            if isinstance(x, str) and x.startswith("+")
-            else "color: #43d6a0; font-weight:700"
-            if isinstance(x, str) and x.startswith("-")
-            else "color: #abb5c0",
-            subset=["漲跌價差", "當日漲跌幅（%）", "未實現損益（元）", "個人報酬率（%）"],
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+        st.markdown("<div class='section-title'>持股即時行情與損益</div><div class='legend'><span class='pos'>紅色：上漲／獲利</span>  <span class='neg'>綠色：下跌／虧損</span>  <span class='flat'>灰色：平盤</span> · 損益已扣估算交易成本</div>", unsafe_allow_html=True)
+        display_cols = ["股票代號", "股票名稱", "最新成交價", "漲跌價差", "當日漲跌幅（%）", "買進均價", "持有股數", "未實現損益（元）", "個人報酬率（%）"]
+        view = df[display_cols].copy()
+        for col in ["最新成交價", "買進均價", "漲跌價差"]:
+            view[col] = view[col].map(lambda x: "—" if pd.isna(x) else f"{x:,.2f}")
+        for col in ["當日漲跌幅（%）", "個人報酬率（%）"]:
+            view[col] = view[col].map(lambda x: "—" if pd.isna(x) else f"{x:+.2f}%")
+        view["持有股數"] = view["持有股數"].map(lambda x: f"{x:,}")
+        view["未實現損益（元）"] = view["未實現損益（元）"].map(lambda x: "—" if pd.isna(x) else f"{x:+,.0f}")
+        st.dataframe(
+            view.style.map(
+                lambda x: "color: #ff6474; font-weight:700"
+                if isinstance(x, str) and x.startswith("+")
+                else "color: #43d6a0; font-weight:700"
+                if isinstance(x, str) and x.startswith("-")
+                else "color: #abb5c0",
+                subset=["漲跌價差", "當日漲跌幅（%）", "未實現損益（元）", "個人報酬率（%）"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("目前尚未加入持股（可直接下方「任意查股」查看個股行情與 K 線，或從左側加入持股）。")
 
     st.markdown("<hr style='border-color:#243244;margin:24px 0 12px'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>個股 K 線圖與大戶／散戶買賣力量分析</div>", unsafe_allow_html=True)
-    chart_c1, chart_c2 = st.columns([1.8, 2.2])
-    options = {f"{row['股票代號']} {row['股票名稱']}": row["股票代號"] for _, row in df.iterrows()}
-    with chart_c1:
-        selected_label = st.selectbox("選擇要檢視的持股", list(options.keys()))
-    with chart_c2:
-        chart_mode = st.radio("圖表模式", ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"], horizontal=True)
+    st.markdown("<div class='section-title'>個股 K 線圖與大戶／散戶買賣力量分析（支援任意查股）</div>", unsafe_allow_html=True)
 
-    sel_code = options[selected_label]
-    sel_row = df[df["股票代號"] == sel_code].iloc[0]
-    sel_cost = float(sel_row["買進均價"])
+    tab_lookup, tab_holding = st.tabs(["🔍 任意輸入代號快查（不影響持股）", "📌 從我的持股選擇"])
 
-    hist_df = fetch_chart_history(sel_code, chart_mode)
-    if hist_df.empty and chart_mode == "當日盤中走勢":
-        local_hist = st.session_state["intraday_history"].get(sel_code, [])
-        if local_hist:
-            hist_df = pd.DataFrame(local_hist)
+    with tab_lookup:
+        q_col1, q_col2, q_col3 = st.columns([1.4, 0.8, 2.2])
+        with q_col1:
+            input_code = st.text_input("輸入任何台股代號（上市／上櫃／ETF）", value=lookup_code, placeholder="例如 2317、2603、00878", max_chars=6, label_visibility="collapsed")
+        with q_col2:
+            do_search = st.button("查詢個股", use_container_width=True, type="primary")
+        with q_col3:
+            lookup_mode = st.radio("快查圖表模式", ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"], horizontal=True, label_visibility="collapsed")
 
-    if not hist_df.empty:
-        fig_chart = go.Figure()
+        if do_search:
+            cleaned = input_code.strip().upper()
+            if cleaned and cleaned.isalnum():
+                st.session_state["quick_lookup_code"] = cleaned
+                st.rerun()
+            else:
+                st.warning("請輸入有效的英數字股票代號。")
 
-        if chart_mode == "近 30 日 K 線圖" and {"開盤", "最高", "最低", "收盤"}.issubset(hist_df.columns):
-            fig_chart.add_trace(go.Candlestick(
-                x=hist_df["時間"],
-                open=hist_df["開盤"],
-                high=hist_df["最高"],
-                low=hist_df["最低"],
-                close=hist_df["收盤"],
-                name=selected_label,
-                increasing=dict(line=dict(color="#ff6474"), fillcolor="#ff6474"),
-                decreasing=dict(line=dict(color="#43d6a0"), fillcolor="#43d6a0"),
-            ))
-            y_min = min(float(hist_df["最低"].min()), sel_cost) * 0.985
-            y_max = max(float(hist_df["最高"].max()), sel_cost) * 1.015
+        active_lookup = st.session_state.get("quick_lookup_code", "").strip().upper()
+        if active_lookup:
+            q_info = quotes.get(active_lookup, {})
+            if not q_info:
+                extra_q, _ = request_quotes([active_lookup])
+                q_info = extra_q.get(active_lookup, {})
+            q_name = q_info.get("n") or active_lookup
+            cost_if_held = float(current[active_lookup]["avg_cost"]) if active_lookup in current else None
+            render_stock_deep_dive(active_lookup, f"{active_lookup} {q_name}", q_info, cost_if_held, lookup_mode)
         else:
-            latest_val = float(hist_df["收盤"].iloc[-1])
-            line_color = "#ff6474" if latest_val >= sel_cost else "#43d6a0"
-            fig_chart.add_trace(go.Scatter(
-                x=hist_df["時間"], y=hist_df["收盤"],
-                mode="lines+markers", name="股價走勢",
-                line=dict(color=line_color, width=2.5),
-                marker=dict(size=5),
-                fill="tozeroy",
-                fillcolor="rgba(255,100,116,0.08)" if latest_val >= sel_cost else "rgba(67,214,160,0.08)",
-            ))
-            y_min = min(float(hist_df["收盤"].min()), sel_cost) * 0.985
-            y_max = max(float(hist_df["收盤"].max()), sel_cost) * 1.015
+            st.caption("在上方輸入任何股票代號並點擊「查詢個股」，即可即時查看報價、近 30 日 K 線圖與大戶／散戶五檔買賣力量。")
 
-        fig_chart.add_hline(
-            y=sel_cost, line_dash="dash", line_color="#68d5e8", line_width=2,
-            annotation_text=f"買進均價成本：{sel_cost:,.2f}",
-            annotation_position="top left",
-            annotation_font=dict(color="#68d5e8", size=12),
-        )
-        fig_chart.update_layout(
-            height=360, margin=dict(l=16, r=16, t=24, b=16),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
-            font=dict(color="#edf3fa", family="Noto Sans TC"),
-            xaxis=dict(showgrid=False, linecolor="#243244", rangeslider=dict(visible=False)),
-            yaxis=dict(range=[y_min, y_max], gridcolor="#1d2b3a", tickformat=",.2f"),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_chart, use_container_width=True)
-    else:
-        st.info(f"目前暫無 {selected_label} 的圖表資料（可能為非交易時段或該代號暫無連線數據）。")
+    with tab_holding:
+        if not df.empty:
+            chart_c1, chart_c2 = st.columns([1.8, 2.2])
+            options = {f"{row['股票代號']} {row['股票名稱']}": row["股票代號"] for _, row in df.iterrows()}
+            with chart_c1:
+                selected_label = st.selectbox("選擇要檢視的持股", list(options.keys()))
+            with chart_c2:
+                chart_mode = st.radio("持股圖表模式", ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"], horizontal=True)
 
-    ob = parse_order_book(quotes.get(sel_code, {}))
-    if ob["has_data"]:
-        ob_col1, ob_col2 = st.columns([1.35, 1])
-        with ob_col1:
-            buy_p = ob["buy_pct"]
-            sell_p = ob["sell_pct"]
-            big_b_p = ob["big_buy_pct"]
-            big_s_p = 100.0 - big_b_p
-            ret_b_p = ob["retail_buy_pct"]
-            ret_s_p = 100.0 - ret_b_p
+            sel_code = options[selected_label]
+            sel_row = df[df["股票代號"] == sel_code].iloc[0]
+            sel_cost = float(sel_row["買進均價"])
+            render_stock_deep_dive(sel_code, selected_label, quotes.get(sel_code, {}), sel_cost, chart_mode)
+        else:
+            st.caption("尚未建立持股清單，請先使用「任意輸入代號快查」或從左側新增持股。")
 
-            st.markdown(
-                f'<div class="ratio-card">'
-                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>'
-                f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;"><span class="pos">整體委買：{ob["total_bid"]:,.0f} 張（{buy_p:.1f}%）</span><span class="neg">整體委賣：{ob["total_ask"]:,.0f} 張（{sell_p:.1f}%）</span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{buy_p:.1f}%;background:#ff6474;"></div><div style="width:{sell_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>大戶大單</b>｜買 <span class="pos">{ob["big_buy_vol"]:,.0f} 張（{big_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["big_sell_vol"]:,.0f} 張（{big_s_p:.1f}%）</span></span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{big_b_p:.1f}%;background:#ff6474;"></div><div style="width:{big_s_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'<div style="display:flex;justify-content:space-between;font-size:13px;margin-top:14px;"><span><b>散戶小單</b>｜買 <span class="pos">{ob["retail_buy_vol"]:,.0f} 張（{ret_b_p:.1f}%）</span></span><span>賣 <span class="neg">{ob["retail_sell_vol"]:,.0f} 張（{ret_s_p:.1f}%）</span></span></div>'
-                f'<div class="ratio-bar-wrap"><div style="width:{ret_b_p:.1f}%;background:#ff6474;"></div><div style="width:{ret_s_p:.1f}%;background:#43d6a0;"></div></div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+    if not df.empty:
+        st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>投資組合資金配置與損益分佈</div>", unsafe_allow_html=True)
+        viz1, viz2 = st.columns(2)
+        valid_viz = df[df["市值"].notna() & (df["市值"] > 0)].copy()
+        if not valid_viz.empty:
+            valid_viz["標籤"] = valid_viz["股票代號"] + " " + valid_viz["股票名稱"]
+            with viz1:
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=valid_viz["標籤"], values=valid_viz["市值"], hole=0.48,
+                    textinfo="label+percent",
+                    marker=dict(line=dict(color="#080e16", width=2)),
+                )])
+                fig_pie.update_layout(
+                    title=dict(text="各檔持股資金佔比（依市值）", font=dict(size=14, color="#9aabbc")),
+                    height=320, margin=dict(l=12, r=12, t=40, b=12),
+                    paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#edf3fa", family="Noto Sans TC"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
 
-        with ob_col2:
-            rows_ob = []
-            for idx in range(5):
-                bp = f"{ob['bid_prices'][idx]:,.2f}" if idx < len(ob["bid_prices"]) else "—"
-                bv = f"{ob['bid_vols'][idx]:,.0f}" if idx < len(ob["bid_vols"]) else "—"
-                ap = f"{ob['ask_prices'][idx]:,.2f}" if idx < len(ob["ask_prices"]) else "—"
-                av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
-                rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
-            st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
-    else:
-        st.caption(f"目前為非盤中時段，{selected_label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
+            with viz2:
+                pnl_sorted = valid_viz.sort_values("未實現損益（元）", ascending=True)
+                bar_colors = ["#ff6474" if v >= 0 else "#43d6a0" for v in pnl_sorted["未實現損益（元）"]]
+                fig_bar = go.Figure(data=[go.Bar(
+                    x=pnl_sorted["未實現損益（元）"], y=pnl_sorted["標籤"],
+                    orientation="h", marker_color=bar_colors,
+                    text=[f"{v:+,.0f} 元" for v in pnl_sorted["未實現損益（元）"]],
+                    textposition="auto",
+                )])
+                fig_bar.update_layout(
+                    title=dict(text="各檔未實現損益排行（已扣估算成本）", font=dict(size=14, color="#9aabbc")),
+                    height=320, margin=dict(l=12, r=12, t=40, b=12),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
+                    font=dict(color="#edf3fa", family="Noto Sans TC"),
+                    xaxis=dict(gridcolor="#1d2b3a", zerolinecolor="#8493a6"),
+                    yaxis=dict(showgrid=False),
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
 
-    st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>投資組合資金配置與損益分佈</div>", unsafe_allow_html=True)
-    viz1, viz2 = st.columns(2)
-    valid_viz = df[df["市值"].notna() & (df["市值"] > 0)].copy()
-    if not valid_viz.empty:
-        valid_viz["標籤"] = valid_viz["股票代號"] + " " + valid_viz["股票名稱"]
-        with viz1:
-            fig_pie = go.Figure(data=[go.Pie(
-                labels=valid_viz["標籤"], values=valid_viz["市值"], hole=0.48,
-                textinfo="label+percent",
-                marker=dict(line=dict(color="#080e16", width=2)),
-            )])
-            fig_pie.update_layout(
-                title=dict(text="各檔持股資金佔比（依市值）", font=dict(size=14, color="#9aabbc")),
-                height=320, margin=dict(l=12, r=12, t=40, b=12),
-                paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#edf3fa", family="Noto Sans TC"),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        with viz2:
-            pnl_sorted = valid_viz.sort_values("未實現損益（元）", ascending=True)
-            bar_colors = ["#ff6474" if v >= 0 else "#43d6a0" for v in pnl_sorted["未實現損益（元）"]]
-            fig_bar = go.Figure(data=[go.Bar(
-                x=pnl_sorted["未實現損益（元）"], y=pnl_sorted["標籤"],
-                orientation="h", marker_color=bar_colors,
-                text=[f"{v:+,.0f} 元" for v in pnl_sorted["未實現損益（元）"]],
-                textposition="auto",
-            )])
-            fig_bar.update_layout(
-                title=dict(text="各檔未實現損益排行（已扣估算成本）", font=dict(size=14, color="#9aabbc")),
-                height=320, margin=dict(l=12, r=12, t=40, b=12),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
-                font=dict(color="#edf3fa", family="Noto Sans TC"),
-                xaxis=dict(gridcolor="#1d2b3a", zerolinecolor="#8493a6"),
-                yaxis=dict(showgrid=False),
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-    with st.expander("交易成本與計算說明"):
-        st.markdown("買進手續費 = 買進均價 × 股數 × 0.1425%，最低 NT$20；賣出手續費 = 最新成交價 × 股數 × 0.1425%，最低 NT$20；證交稅 = 最新成交市值 × 0.3%。未實現損益 = 市值 − 買進金額 − 買進手續費 − 預估賣出手續費 − 證交稅。費用以元為單位四捨五入。")
-        st.caption("提醒：交易稅率與手續費折扣可能依商品、交易方式或券商而異。此處依普通股票費率估算，非券商正式對帳數字。")
-        cost_view = df[["股票代號", "股票名稱", "買進手續費", "預估賣出手續費", "證交稅"]].copy()
-        st.dataframe(cost_view.style.format({"買進手續費": "{:,.0f}", "預估賣出手續費": "{:,.0f}", "證交稅": "{:,.0f}"}), use_container_width=True, hide_index=True)
+        with st.expander("交易成本與計算說明"):
+            st.markdown("買進手續費 = 買進均價 × 股數 × 0.1425%，最低 NT$20；賣出手續費 = 最新成交價 × 股數 × 0.1425%，最低 NT$20；證交稅 = 最新成交市值 × 0.3%。未實現損益 = 市值 − 買進金額 − 買進手續費 − 預估賣出手續費 − 證交稅。費用以元為單位四捨五入。")
+            st.caption("提醒：交易稅率與手續費折扣可能依商品、交易方式或券商而異。此處依普通股票費率估算，非券商正式對帳數字。")
+            cost_view = df[["股票代號", "股票名稱", "買進手續費", "預估賣出手續費", "證交稅"]].copy()
+            st.dataframe(cost_view.style.format({"買進手續費": "{:,.0f}", "預估賣出手續費": "{:,.0f}", "證交稅": "{:,.0f}"}), use_container_width=True, hide_index=True)
 
     unavailable = [code for code in current if code not in quotes or (number(quotes.get(code, {}).get("z")) is None and number(quotes.get(code, {}).get("y")) is None)]
     if unavailable:
