@@ -468,7 +468,7 @@ def live_dashboard() -> None:
             ret_b_p = ob["retail_buy_pct"]
             ret_s_p = 100.0 - ret_b_p
 
-           st.markdown(
+st.markdown(
                 f'<div class="ratio-card">'
                 f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{selected_label} · 即時大戶／散戶買賣比例推估</div>'
                 f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
