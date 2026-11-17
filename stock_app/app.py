@@ -1,20 +1,22 @@
 from __future__ import annotations
-
 import base64
 import json
 import time
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
 API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+TWSE_INST_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
+TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 FEE_RATE = 0.001425
 SELL_TAX_RATE = 0.003
@@ -25,18 +27,18 @@ DEFAULT_PORTFOLIO: dict[str, dict[str, Any]] = {
     "0050": {"avg_cost": 185.5, "shares": 2000, "name": "元大台灣50"},
 }
 
-st.set_page_config(page_title="台股・持股中控台", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="台股・籌碼K線中控台", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;600;700;800&display=swap');
-:root { --bg:#080e16; --panel:#101a26; --line:#243244; --muted:#8493a6; --text:#edf3fa; --red:#ff6474; --green:#43d6a0; --cyan:#68d5e8; }
+:root { --bg:#080e16; --panel:#101a26; --line:#243244; --muted:#8493a6; --text:#edf3fa; --red:#ff6474; --green:#43d6a0; --cyan:#68d5e8; --gold:#f5c26b; }
 .stApp { background:radial-gradient(ellipse at 70% 0%,#122539 0%,var(--bg) 42%); color:var(--text); font-family:'Noto Sans TC',sans-serif; }
 .block-container {padding-top:2rem; max-width:1440px;}
 [data-testid="stSidebar"] {background:#0b131d;border-right:1px solid var(--line);}
-[data-testid="stMetric"] {background:linear-gradient(145deg,#142231,#0e1722);border:1px solid #263649;padding:18px 20px;border-radius:14px;}
-[data-testid="stMetricLabel"] {color:#9aabbc;font-size:.84rem;}
-[data-testid="stMetricValue"] {font-family:'DM Mono',monospace;color:#f3f7fc;font-size:1.8rem;}
+[data-testid="stMetric"] {background:linear-gradient(145deg,#142231,#0e1722);border:1px solid #263649;padding:16px 18px;border-radius:14px;}
+[data-testid="stMetricLabel"] {color:#9aabbc;font-size:.82rem;}
+[data-testid="stMetricValue"] {font-family:'DM Mono',monospace;color:#f3f7fc;font-size:1.65rem;}
 .hero {display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:0 0 18px;margin-bottom:20px;}
 .eyebrow {color:var(--cyan);font:500 11px 'DM Mono',monospace;letter-spacing:.18em;text-transform:uppercase;}
 .title {font-size:28px;font-weight:800;letter-spacing:-.04em;margin:3px 0 0;}
@@ -48,6 +50,8 @@ st.markdown("""
 .ratio-card {background:#0e1722;border:1px solid #243244;border-radius:12px;padding:16px 18px;margin-bottom:12px;}
 .ratio-bar-wrap {display:flex;height:14px;border-radius:99px;overflow:hidden;background:#1a2634;margin:10px 0;}
 .quote-banner {background:linear-gradient(145deg,#122030,#0d1620);border:1px solid #26384d;border-radius:12px;padding:14px 18px;margin:10px 0 14px;display:flex;flex-wrap:wrap;gap:24px;align-items:center;}
+.chip-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:10px 0 16px;}
+.chip-box {background:#0e1722;border:1px solid #243244;border-radius:10px;padding:12px 14px;}
 div[data-testid="stDataFrame"] {border:1px solid var(--line);border-radius:12px;overflow:hidden;}
 .stButton>button {border-radius:9px;} .stTextInput input,.stNumberInput input {background:#0d1722;}
 footer {visibility:hidden;}
@@ -156,37 +160,107 @@ def save_portfolio(data: dict[str, dict[str, Any]], sync_url: bool = True) -> No
             st.session_state["pending_storage_sync"] = ""
 
 
+def number(value: Any) -> float | None:
+    if value is None or value == "" or value == "-" or value == "--":
+        return None
+    try:
+        parsed = float(str(value).replace(",", ""))
+        return parsed if parsed >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def signed_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(round(float(str(value).replace(",", "").strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
+def fetch_yahoo_live_quote(code: str) -> dict[str, Any]:
+    headers = {"User-Agent": USER_AGENT}
+    for suffix in (".TW", ".TWO"):
+        try:
+            resp = requests.get(
+                YAHOO_CHART_URL.format(symbol=f"{code}{suffix}"),
+                params={"interval": "1m", "range": "1d"},
+                headers=headers,
+                timeout=4,
+            )
+            if resp.status_code != 200:
+                continue
+            res = resp.json().get("chart", {}).get("result", [])
+            if not res:
+                continue
+            meta = res[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            if price is not None:
+                vol_lots = round((meta.get("regularMarketVolume") or 0) / 1000)
+                return {
+                    "c": code,
+                    "n": meta.get("shortName") or meta.get("symbol", code).replace(suffix, ""),
+                    "z": str(price),
+                    "y": str(prev) if prev is not None else "",
+                    "h": str(meta.get("regularMarketDayHigh") or ""),
+                    "l": str(meta.get("regularMarketDayLow") or ""),
+                    "v": str(vol_lots),
+                }
+        except Exception:
+            continue
+    return {}
+
+
 def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
     unique_codes = list(dict.fromkeys(c for c in codes if c))
     if not unique_codes:
         return {}, []
     symbols = "|".join(f"{market}_{code}.tw" for code in unique_codes for market in ("tse", "otc"))
-    params = {"ex_ch": symbols, "json": "1", "delay": "0"}
+    params = {"ex_ch": symbols, "json": "1", "delay": "0", "_": str(int(time.time() * 1000))}
     headers = {"User-Agent": USER_AGENT, "Referer": "https://mis.twse.com.tw/stock/fibest.jsp", "Accept": "application/json, text/plain, */*"}
-    last_error = "行情服務暫時無法連線"
-    for attempt in range(3):
-        try:
-            response = requests.get(API_URL, params=params, headers=headers, timeout=(4, 10))
-            response.raise_for_status()
-            payload = response.json()
-            result: dict[str, dict[str, Any]] = {}
-            for row in payload.get("msgArray", []):
-                code = str(row.get("c", ""))
-                if code and code not in result:
-                    result[code] = row
-            return result, []
-        except (requests.RequestException, ValueError) as exc:
-            last_error = str(exc)
-            if attempt < 2:
-                time.sleep(0.6 * (2 ** attempt))
-    return {}, [f"行情來源請求失敗：{last_error}"]
+    result: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    try:
+        response = requests.get(API_URL, params=params, headers=headers, timeout=(3, 6))
+        response.raise_for_status()
+        payload = response.json()
+        for row in payload.get("msgArray", []):
+            code = str(row.get("c", ""))
+            if code and code not in result:
+                result[code] = row
+    except (requests.RequestException, ValueError):
+        pass
+
+    for code in unique_codes:
+        twse_row = result.get(code, {})
+        if number(twse_row.get("z")) is None:
+            y_row = fetch_yahoo_live_quote(code)
+            if y_row:
+                if twse_row:
+                    twse_row["z"] = y_row["z"]
+                    if not number(twse_row.get("y")) and y_row.get("y"):
+                        twse_row["y"] = y_row["y"]
+                    if not number(twse_row.get("h")) and y_row.get("h"):
+                        twse_row["h"] = y_row["h"]
+                    if not number(twse_row.get("l")) and y_row.get("l"):
+                        twse_row["l"] = y_row["l"]
+                    if not number(twse_row.get("v")) and y_row.get("v"):
+                        twse_row["v"] = y_row["v"]
+                else:
+                    result[code] = y_row
+
+    if not result:
+        errors.append("目前行情介面暫無回應，系統將於下次週期自動重試。")
+    return result, errors
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_chart_history(code: str, mode: str) -> pd.DataFrame:
     is_intraday = mode == "當日盤中走勢"
     interval = "5m" if is_intraday else "1d"
-    range_str = "1d" if is_intraday else "3mo"
+    range_str = "1d" if is_intraday else "6mo"
     headers = {"User-Agent": USER_AGENT}
     for suffix in (".TW", ".TWO"):
         try:
@@ -207,24 +281,99 @@ def fetch_chart_history(code: str, mode: str) -> pd.DataFrame:
             highs = quote.get("high", [])
             lows = quote.get("low", [])
             closes = quote.get("close", [])
+            vols = quote.get("volume", [])
             rows = []
-            for ts, o, h, l, c in zip(timestamps, opens, highs, lows, closes):
+            for ts, o, h, l, c, v in zip(timestamps, opens, highs, lows, closes, vols):
                 if c is not None:
                     dt = datetime.fromtimestamp(ts).astimezone()
                     label = dt.strftime("%H:%M") if is_intraday else dt.strftime("%m/%d")
                     rows.append({
+                        "日期鍵": dt.strftime("%Y%m%d"),
                         "時間": label,
                         "開盤": round(float(o if o is not None else c), 2),
                         "最高": round(float(h if h is not None else c), 2),
                         "最低": round(float(l if l is not None else c), 2),
                         "收盤": round(float(c), 2),
+                        "成交張數": round(float(v or 0) / 1000),
                     })
             if rows:
                 df = pd.DataFrame(rows)
-                return df if is_intraday else df.tail(30).reset_index(drop=True)
+                if not is_intraday:
+                    df["MA5"] = df["收盤"].rolling(5).mean().round(2)
+                    df["MA10"] = df["收盤"].rolling(10).mean().round(2)
+                    df["MA20"] = df["收盤"].rolling(20).mean().round(2)
+                    return df.tail(35).reset_index(drop=True)
+                return df
         except Exception:
             continue
     return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_chip_data(code: str, date_keys: tuple[str, ...]) -> pd.DataFrame:
+    if not date_keys:
+        return pd.DataFrame()
+    target_dates = date_keys[-12:]
+    headers = {"User-Agent": USER_AGENT, "Referer": "https://www.twse.com.tw/"}
+    records = []
+    for d_str in target_dates:
+        foreign_net = 0
+        trust_net = 0
+        dealer_net = 0
+        margin_diff = 0
+        short_diff = 0
+        margin_bal = 0
+        short_bal = 0
+        found = False
+        try:
+            r1 = requests.get(TWSE_INST_URL, params={"response": "json", "date": d_str, "selectType": "ALLBUT0999"}, headers=headers, timeout=4)
+            if r1.status_code == 200:
+                j1 = r1.json()
+                for row in j1.get("data", []):
+                    if row and str(row[0]).strip() == code:
+                        foreign_net = round(signed_int(row[4]) / 1000)
+                        trust_net = round(signed_int(row[10]) / 1000)
+                        dealer_net = round(signed_int(row[11]) / 1000)
+                        found = True
+                        break
+        except Exception:
+            pass
+
+        try:
+            r2 = requests.get(TWSE_MARGIN_URL, params={"response": "json", "date": d_str, "selectType": "ALL"}, headers=headers, timeout=4)
+            if r2.status_code == 200:
+                j2 = r2.json()
+                tables = j2.get("tables", [])
+                rows_m = tables[1].get("data", []) if len(tables) > 1 else j2.get("data", [])
+                for row in rows_m:
+                    if row and str(row[0]).strip() == code:
+                        prev_m = signed_int(row[5])
+                        curr_m = signed_int(row[6])
+                        prev_s = signed_int(row[11])
+                        curr_s = signed_int(row[12])
+                        margin_diff = curr_m - prev_m
+                        short_diff = curr_s - prev_s
+                        margin_bal = curr_m
+                        short_bal = curr_s
+                        found = True
+                        break
+        except Exception:
+            pass
+
+        if found:
+            records.append({
+                "日期鍵": d_str,
+                "時間": f"{d_str[4:6]}/{d_str[6:8]}",
+                "外資買賣超": foreign_net,
+                "投信買賣超": trust_net,
+                "自營商買賣超": dealer_net,
+                "三大法人合計": foreign_net + trust_net + dealer_net,
+                "融資增減": margin_diff,
+                "融券增減": short_diff,
+                "融資餘額": margin_bal,
+                "融券餘額": short_bal,
+            })
+    return pd.DataFrame(records)
 
 
 def parse_order_book(quote: dict[str, Any]) -> dict[str, Any]:
@@ -284,16 +433,6 @@ def parse_order_book(quote: dict[str, Any]) -> dict[str, Any]:
         "retail_buy_pct": (retail_buy_vol / retail_total * 100) if retail_total > 0 else 50.0,
         "has_data": total_all > 0,
     }
-
-
-def number(value: Any) -> float | None:
-    if value is None or value == "" or value == "-" or value == "--":
-        return None
-    try:
-        parsed = float(str(value).replace(",", ""))
-        return parsed if parsed >= 0 else None
-    except (TypeError, ValueError):
-        return None
 
 
 def make_rows(portfolio: dict[str, dict[str, Any]], quotes: dict[str, dict[str, Any]]) -> pd.DataFrame:
@@ -364,8 +503,18 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
         if local_hist:
             hist_df = pd.DataFrame(local_hist)
 
+    chip_df = pd.DataFrame()
+    if chart_mode != "當日盤中走勢" and not hist_df.empty and "日期鍵" in hist_df.columns:
+        chip_df = fetch_chip_data(code, tuple(hist_df["日期鍵"].tolist()))
+
     if not hist_df.empty:
-        fig_chart = go.Figure()
+        has_chips = not chip_df.empty
+        fig_chart = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
+            row_heights=[0.66, 0.34],
+            subplot_titles=("價格與均線（MA5 / MA10 / MA20）", "三大法人買賣超（張）" if has_chips else "成交量（張）"),
+        )
+
         if chart_mode == "近 30 日 K 線圖" and {"開盤", "最高", "最低", "收盤"}.issubset(hist_df.columns):
             fig_chart.add_trace(go.Candlestick(
                 x=hist_df["時間"],
@@ -373,10 +522,16 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
                 high=hist_df["最高"],
                 low=hist_df["最低"],
                 close=hist_df["收盤"],
-                name=label,
+                name="日K線",
                 increasing=dict(line=dict(color="#ff6474"), fillcolor="#ff6474"),
                 decreasing=dict(line=dict(color="#43d6a0"), fillcolor="#43d6a0"),
-            ))
+            ), row=1, col=1)
+            for ma_col, ma_color in [("MA5", "#f5c26b"), ("MA10", "#68d5e8"), ("MA20", "#c49bff")]:
+                if ma_col in hist_df.columns:
+                    fig_chart.add_trace(go.Scatter(
+                        x=hist_df["時間"], y=hist_df[ma_col], mode="lines",
+                        name=ma_col, line=dict(color=ma_color, width=1.4),
+                    ), row=1, col=1)
             raw_min = float(hist_df["最低"].min())
             raw_max = float(hist_df["最高"].max())
         else:
@@ -390,7 +545,7 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
                 marker=dict(size=5),
                 fill="tozeroy",
                 fillcolor="rgba(255,100,116,0.08)" if latest_val >= ref_val else "rgba(67,214,160,0.08)",
-            ))
+            ), row=1, col=1)
             raw_min = float(hist_df["收盤"].min())
             raw_max = float(hist_df["收盤"].max())
 
@@ -399,25 +554,65 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
             y_max = max(raw_max, cost_price) * 1.015
             fig_chart.add_hline(
                 y=cost_price, line_dash="dash", line_color="#68d5e8", line_width=2,
-                annotation_text=f"買進均價成本：{cost_price:,.2f}",
+                annotation_text=f"買進均價：{cost_price:,.2f}",
                 annotation_position="top left",
                 annotation_font=dict(color="#68d5e8", size=12),
+                row=1, col=1,
             )
         else:
             y_min = raw_min * 0.985
             y_max = raw_max * 1.015
 
+        if has_chips:
+            fig_chart.add_trace(go.Bar(x=chip_df["時間"], y=chip_df["外資買賣超"], name="外資", marker_color="#ff6474"), row=2, col=1)
+            fig_chart.add_trace(go.Bar(x=chip_df["時間"], y=chip_df["投信買賣超"], name="投信", marker_color="#f5c26b"), row=2, col=1)
+            fig_chart.add_trace(go.Bar(x=chip_df["時間"], y=chip_df["自營商買賣超"], name="自營商", marker_color="#68d5e8"), row=2, col=1)
+        elif "成交張數" in hist_df.columns:
+            vol_colors = ["#ff6474" if c >= o else "#43d6a0" for c, o in zip(hist_df["收盤"], hist_df.get("開盤", hist_df["收盤"]))]
+            fig_chart.add_trace(go.Bar(x=hist_df["時間"], y=hist_df["成交張數"], name="成交張數", marker_color=vol_colors), row=2, col=1)
+
         fig_chart.update_layout(
-            height=360, margin=dict(l=16, r=16, t=24, b=16),
+            height=480, margin=dict(l=16, r=16, t=34, b=16),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(16,26,38,0.55)",
             font=dict(color="#edf3fa", family="Noto Sans TC"),
+            barmode="relative",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
             xaxis=dict(showgrid=False, linecolor="#243244", rangeslider=dict(visible=False)),
+            xaxis2=dict(showgrid=False, linecolor="#243244"),
             yaxis=dict(range=[y_min, y_max], gridcolor="#1d2b3a", tickformat=",.2f"),
-            showlegend=False,
+            yaxis2=dict(gridcolor="#1d2b3a", zerolinecolor="#8493a6"),
         )
         st.plotly_chart(fig_chart, use_container_width=True)
     else:
         st.info(f"目前暫無 {label} 的圖表資料（可能為非交易時段或該代號暫無連線數據）。")
+
+    if not chip_df.empty:
+        recent5 = chip_df.tail(5)
+        f5 = int(recent5["外資買賣超"].sum())
+        t5 = int(recent5["投信買賣超"].sum())
+        d5 = int(recent5["自營商買賣超"].sum())
+        tot5 = f5 + t5 + d5
+        latest_row = chip_df.iloc[-1]
+        m_diff = int(latest_row["融資增減"])
+        s_diff = int(latest_row["融券增減"])
+        m_bal = int(latest_row["融資餘額"])
+        s_bal = int(latest_row["融券餘額"])
+        ratio_sm = (s_bal / m_bal * 100) if m_bal > 0 else 0.0
+
+        def fmt_chip(val: int) -> str:
+            c = "pos" if val > 0 else ("neg" if val < 0 else "flat")
+            return f'<span class="{c}">{val:+,d} 張</span>'
+
+        st.markdown(
+            f'<div class="chip-grid">'
+            f'<div class="chip-box"><div class="subtle">近5日三大法人主力合計</div><div style="font-size:17px;margin-top:4px;">{fmt_chip(tot5)}</div></div>'
+            f'<div class="chip-box"><div class="subtle">近5日外資累積</div><div style="font-size:17px;margin-top:4px;">{fmt_chip(f5)}</div></div>'
+            f'<div class="chip-box"><div class="subtle">近5日投信累積</div><div style="font-size:17px;margin-top:4px;">{fmt_chip(t5)}</div></div>'
+            f'<div class="chip-box"><div class="subtle">最新一日融資增減</div><div style="font-size:17px;margin-top:4px;">{fmt_chip(m_diff)}</div></div>'
+            f'<div class="chip-box"><div class="subtle">最新一日融券增減 / 券資比</div><div style="font-size:15px;margin-top:4px;">{fmt_chip(s_diff)} · {ratio_sm:.1f}%</div></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     ob = parse_order_book(quote)
     if ob["has_data"]:
@@ -432,7 +627,7 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
 
             st.markdown(
                 f'<div class="ratio-card">'
-                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{label} · 即時大戶／散戶買賣比例推估</div>'
+                f'<div style="font-weight:700;font-size:15px;margin-bottom:4px;">{label} · 盤中五檔大戶／散戶掛單比例</div>'
                 f'<div class="subtle" style="margin-bottom:12px;">依證交所最佳五檔委託掛單規模（單檔 ≥ 200 萬或 ≥ 30 張歸為大單）即時計算</div>'
                 f'<div style="display:flex;justify-content:space-between;font-size:13px;"><span class="pos">整體委買：{ob["total_bid"]:,.0f} 張（{buy_p:.1f}%）</span><span class="neg">整體委賣：{ob["total_ask"]:,.0f} 張（{sell_p:.1f}%）</span></div>'
                 f'<div class="ratio-bar-wrap"><div style="width:{buy_p:.1f}%;background:#ff6474;"></div><div style="width:{sell_p:.1f}%;background:#43d6a0;"></div></div>'
@@ -454,7 +649,7 @@ def render_stock_deep_dive(code: str, label: str, quote: dict[str, Any], cost_pr
                 rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
             st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
     else:
-        st.caption(f"目前為非盤中時段，{label} 暫無五檔委買委賣掛單資料（開盤期間 09:00–13:30 會即時顯示大戶／散戶買賣比例）。")
+        st.caption(f"目前為非盤中時段或海外 IP 暫未取得五檔明細，{label} 暫無五檔掛單資料。")
 
 
 portfolio = load_portfolio()
@@ -519,7 +714,7 @@ with st.sidebar:
     st.caption("本機記憶說明：持股會自動儲存在目前手機或電腦瀏覽器的本機空間，重開 App 也會自動載入；傳送不含 ?p= 的主網址給朋友時，對方只會看到預設範例。")
 
 st.markdown("""
-<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · PRIVATE PORTFOLIO</div><div class="title">台股・持股中控台</div></div><div class="pill">裝置自動記憶 · 任意查股</div></div>
+<div class="hero"><div><div class="eyebrow">TAIWAN EQUITY · CHIP & K-LINE TERMINAL</div><div class="title">台股・籌碼K線中控台</div></div><div class="pill">三大法人 · 融資券 · 即時雙引擎</div></div>
 """, unsafe_allow_html=True)
 
 controls1, controls2, controls3 = st.columns([1.3, 2, 2.3])
@@ -528,7 +723,7 @@ with controls1:
 with controls2:
     frequency = st.slider("更新頻率（秒）", min_value=5, max_value=30, value=10, step=1, disabled=not auto_refresh)
 with controls3:
-    st.markdown("<div class='subtle' style='padding-top:30px'>持股自動儲存在本機裝置中，關閉重開免重新輸入。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtle' style='padding-top:30px'>整合日K均線、三大法人主力買賣超、融資券與即時報價。</div>", unsafe_allow_html=True)
 
 
 @st.fragment(run_every=frequency if auto_refresh else None)
@@ -601,19 +796,19 @@ def live_dashboard() -> None:
             hide_index=True,
         )
     else:
-        st.info("目前尚未加入持股（可直接下方「任意查股」查看個股行情與 K 線，或從左側加入持股）。")
+        st.info("目前尚未加入持股（可直接下方「任意查股」查看個股籌碼與 K 線，或從左側加入持股）。")
 
     st.markdown("<hr style='border-color:#243244;margin:24px 0 12px'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>個股 K 線圖與大戶／散戶買賣力量分析（支援任意查股）</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>籌碼K線分析（均線・三大法人主力・融資融券・五檔大單）</div>", unsafe_allow_html=True)
 
-    tab_lookup, tab_holding = st.tabs(["🔍 任意輸入代號快查（不影響持股）", "📌 從我的持股選擇"])
+    tab_lookup, tab_holding = st.tabs(["🔍 任意輸入代號查籌碼K線（不影響持股）", "📌 從我的持股查看籌碼K線"])
 
     with tab_lookup:
         q_col1, q_col2, q_col3 = st.columns([1.4, 0.8, 2.2])
         with q_col1:
             input_code = st.text_input("輸入任何台股代號（上市／上櫃／ETF）", value=lookup_code, placeholder="例如 2317、2603、00878", max_chars=6, label_visibility="collapsed")
         with q_col2:
-            do_search = st.button("查詢個股", use_container_width=True, type="primary")
+            do_search = st.button("查詢籌碼K線", use_container_width=True, type="primary")
         with q_col3:
             lookup_mode = st.radio("快查圖表模式", ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"], horizontal=True, label_visibility="collapsed")
 
@@ -635,7 +830,7 @@ def live_dashboard() -> None:
             cost_if_held = float(current[active_lookup]["avg_cost"]) if active_lookup in current else None
             render_stock_deep_dive(active_lookup, f"{active_lookup} {q_name}", q_info, cost_if_held, lookup_mode)
         else:
-            st.caption("在上方輸入任何股票代號並點擊「查詢個股」，即可即時查看報價、近 30 日 K 線圖與大戶／散戶五檔買賣力量。")
+            st.caption("在上方輸入任何股票代號並點擊「查詢籌碼K線」，即可查看日K均線、外資／投信／自營商買賣超、融資券與五檔大戶散戶比例。")
 
     with tab_holding:
         if not df.empty:
@@ -651,7 +846,7 @@ def live_dashboard() -> None:
             sel_cost = float(sel_row["買進均價"])
             render_stock_deep_dive(sel_code, selected_label, quotes.get(sel_code, {}), sel_cost, chart_mode)
         else:
-            st.caption("尚未建立持股清單，請先使用「任意輸入代號快查」或從左側新增持股。")
+            st.caption("尚未建立持股清單，請先使用「任意輸入代號查籌碼K線」或從左側新增持股。")
 
     if not df.empty:
         st.markdown("<hr style='border-color:#243244;margin:20px 0 12px'>", unsafe_allow_html=True)
@@ -705,4 +900,5 @@ def live_dashboard() -> None:
 
 
 live_dashboard()
-st.markdown("<div class='subtle' style='text-align:center;margin:28px 0 8px'>行情由 TWSE MIS 與公開圖表介面提供 · 本工具不提供投資建議</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtle' style='text-align:center;margin:28px 0 8px'>行情與籌碼由 TWSE 證交所與 Yahoo Finance 提供 · 本工具不提供投資建議</div>", unsafe_allow_html=True)
+EOF
