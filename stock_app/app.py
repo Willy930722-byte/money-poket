@@ -901,4 +901,3 @@ def live_dashboard() -> None:
 
 live_dashboard()
 st.markdown("<div class='subtle' style='text-align:center;margin:28px 0 8px'>行情與籌碼由 TWSE 證交所與 Yahoo Finance 提供 · 本工具不提供投資建議</div>", unsafe_allow_html=True)
-EOF
