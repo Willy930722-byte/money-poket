@@ -23,7 +23,7 @@ import streamlit.components.v1 as components
 # 1. 全域常數、API 端點與系統預設參數 (GLOBAL CONSTANTS & ENDPOINTS)
 # ==============================================================================
 APP_TITLE = "台股・籌碼K線旗艦量化終端"
-APP_VERSION = "v6.0 Ultra Quant Pro"
+APP_VERSION = "v7.0 Dual-K Alpha Pro"
 
 TWSE_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -51,7 +51,7 @@ ETF_TAX_RATE = 0.001
 DAY_TRADE_TAX_RATE = 0.0015
 MIN_FEE_NTD = 20
 ODD_LOT_MIN_FEE_NTD = 1
-MARGIN_LOAN_RATIO_TSE = 0.60   # 上市融資成數 6 成 (自備 4 成)
+MARGIN_LOAN_RATIO_TSE = 0.60
 MARGIN_MAINTENANCE_WARN = 140.0
 MARGIN_MAINTENANCE_CALL = 130.0
 
@@ -135,16 +135,23 @@ US_DEFAULT_STOCKS: list[tuple[str, str]] = [
 ]
 
 GLOBAL_INDICES: dict[str, tuple[str, str]] = {
-    "YM=F": ("小道瓊期", "美股期指"),
-    "ES=F": ("小S&P500", "美股期指"),
-    "NQ=F": ("小那斯達克", "美股期指"),
     "^TWII": ("台灣加權指數", "台股大盤"),
     "^TWOII": ("櫃買指數", "上櫃大盤"),
     "^SOX": ("費城半導體", "半導體指標"),
+    "YM=F": ("小道瓊期", "美股期指"),
+    "ES=F": ("小S&P500", "美股期指"),
+    "NQ=F": ("小那斯達克", "美股期指"),
     "TWD=X": ("美元 / 台幣", "外匯動態"),
     "GC=F": ("黃金期貨", "避險金屬"),
     "CL=F": ("WTI 原油", "能源指標"),
     "^N225": ("日經225", "亞股指標"),
+}
+
+MARKET_K_OPTIONS: dict[str, str] = {
+    "台灣加權指數 (^TWII)": "^TWII",
+    "櫃買指數 (^TWOII)": "^TWOII",
+    "費城半導體 (^SOX)": "^SOX",
+    "小那斯達克期 (NQ=F)": "NQ=F",
 }
 
 SECTOR_PROXIES: dict[str, list[tuple[str, str]]] = {
@@ -195,7 +202,7 @@ st.markdown("""
 
 .block-container {
     padding: 0.75rem 0.75rem 5.5rem !important;
-    max-width: 1160px !important;
+    max-width: 1180px !important;
     margin: 0 auto !important;
 }
 
@@ -272,6 +279,14 @@ footer { visibility: hidden; }
     font-size: 11px;
     margin-top: 3px;
     color: var(--muted);
+}
+
+.market-k-panel {
+    background: linear-gradient(160deg, #161922, #101218);
+    border: 1px solid #2c3140;
+    border-radius: 14px;
+    padding: 12px 14px;
+    margin: 8px 0 14px;
 }
 
 .inventory-header {
@@ -522,6 +537,9 @@ div[data-testid="stDataFrame"] {
 STATE_DEFAULTS: dict[str, Any] = {
     "intraday_history": {},
     "quick_lookup_code": "2330",
+    "show_home_stock_k": False,      # 主畫面是否展開「查詢個股專屬K線」
+    "home_market_symbol": "^TWII",   # 主畫面大盤K線預設標的
+    "show_home_market_k": True,      # 主畫面是否常駐大盤K線
     "top_section": "台股",
     "bottom_tab": "庫存股",
     "sub_tab": "即時損益",
@@ -531,13 +549,13 @@ STATE_DEFAULTS: dict[str, Any] = {
     "sort_by": "市值",
     "auto_refresh": True,
     "refresh_freq": 10,
-    "fee_discount": 0.28,       # 券商電子下單預設 28 折
-    "odd_lot_min_fee": True,    # 零股手續費最低 1 元優惠
-    "cash_balance": 150000,     # 交割戶可用現金餘額
-    "margin_interest_rate": 6.45,  # 融資年利率 (%)
-    "whale_min_wan": 200,       # 五檔大戶單金額門檻（萬元）
-    "whale_min_lots": 30,       # 五檔大戶單張數門檻（張）
-    "realized_trades": [],      # 已實現損益與配息帳本
+    "fee_discount": 0.28,
+    "odd_lot_min_fee": True,
+    "cash_balance": 150000,
+    "margin_interest_rate": 6.45,
+    "whale_min_wan": 200,
+    "whale_min_lots": 30,
+    "realized_trades": [],
     "user_notes": (
         "・2330 觀察外資與投信同步買超力道，沿 5 日線操作\n"
         "・00981A 波段核心持股，逢回分批布局\n"
@@ -809,7 +827,7 @@ def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[st
 
 
 # ==============================================================================
-# 5. 全方位技術指標與 K 線形態辨識引擎 (MA / 布林 / MACD / KD / RSI / ATR / 形態學)
+# 5. 全方位技術指標、形態辨識、相對強弱 RS 與斐波那契運算引擎
 # ==============================================================================
 def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "收盤" not in df.columns:
@@ -875,9 +893,6 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> list[str]:
-    """
-    自動辨識近 3 日 K 線組合與均線/指標型態
-    """
     patterns: list[str] = []
     if df.empty or len(df) < 5 or not {"開盤", "最高", "最低", "收盤"}.issubset(df.columns):
         return patterns
@@ -886,28 +901,23 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> list[str]:
     r1 = df.iloc[-2]
     r2 = df.iloc[-3]
 
-    # 1. 紅三兵 (連續三日收紅且收盤逐日墊高)
     if (r0["收盤"] > r0["開盤"]) and (r1["收盤"] > r1["開盤"]) and (r2["收盤"] > r2["開盤"]):
         if r0["收盤"] > r1["收盤"] > r2["收盤"]:
             patterns.append("🔥 紅三兵多頭推進")
 
-    # 2. 多頭吞噬 (前日黑K，今日紅K實體包覆前日實體)
     if (r1["收盤"] < r1["開盤"]) and (r0["收盤"] > r0["開盤"]):
         if r0["開盤"] <= r1["收盤"] and r0["收盤"] >= r1["開盤"]:
             patterns.append("⚡ 多頭吞噬轉強")
 
-    # 3. 帶量長紅突破月線
     if "MA20" in df.columns and "VMA5" in df.columns and "成交張數" in df.columns:
         if r1["收盤"] < r1["MA20"] and r0["收盤"] > r0["MA20"] and r0["成交張數"] > r0["VMA5"] * 1.3:
             patterns.append("🚀 帶量長紅突破月線")
 
-    # 4. 均線三線糾結 (MA5, MA10, MA20 乖離極小)
     if {"MA5", "MA10", "MA20"}.issubset(df.columns) and r0["收盤"] > 0:
         ma_spread = (max(r0["MA5"], r0["MA10"], r0["MA20"]) - min(r0["MA5"], r0["MA10"], r0["MA20"])) / r0["收盤"]
         if ma_spread <= 0.015:
             patterns.append("🎯 三線糾結變盤前夕")
 
-    # 5. KD 低檔黃金交叉
     if {"K", "D"}.issubset(df.columns):
         if r1["K"] <= r1["D"] and r0["K"] > r0["D"] and r0["K"] < 35:
             patterns.append("💎 KD 低檔黃金交叉")
@@ -916,9 +926,6 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> list[str]:
 
 
 def compute_volume_profile(df: pd.DataFrame, bins: int = 12) -> tuple[pd.DataFrame, float]:
-    """
-    計算分價量表 (Volume Profile) 與最大籌碼密集價位 (POC)
-    """
     if df.empty or not {"收盤", "成交張數"}.issubset(df.columns):
         return pd.DataFrame(), 0.0
     low_p = float(df["最低"].min()) if "最低" in df.columns else float(df["收盤"].min())
@@ -946,8 +953,8 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 12) -> tuple[pd.DataFra
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_chart_history(code: str, mode: str, bars: int = 45) -> pd.DataFrame:
     is_intraday = mode == "當日盤中走勢"
-    interval = "5m" if is_intraday else "1d"
-    range_str = "1d" if is_intraday else "1y"
+    interval = "5m" if is_intraday else ("1wk" if mode == "週 K 線圖" else "1d")
+    range_str = "1d" if is_intraday else ("2y" if mode == "週 K 線圖" else "1y")
     headers = {"User-Agent": USER_AGENT}
     is_global_or_us = code.isalpha() or "=" in code or "^" in code
     suffixes = ("",) if is_global_or_us else (".TW", ".TWO", "")
@@ -1048,7 +1055,6 @@ def _fetch_single_day_chip(code: str, d_str: str, roc_date: str) -> dict[str, An
     found_inst = False
     found_margin = False
 
-    # 1A. 上市 (TWSE) 三大法人買賣超
     try:
         r1 = requests.get(
             TWSE_INST_URL,
@@ -1067,7 +1073,6 @@ def _fetch_single_day_chip(code: str, d_str: str, roc_date: str) -> dict[str, An
     except Exception:
         pass
 
-    # 1B. 上櫃 (TPEx) 三大法人買賣超
     if not found_inst:
         try:
             r1_otc = requests.get(
@@ -1087,7 +1092,6 @@ def _fetch_single_day_chip(code: str, d_str: str, roc_date: str) -> dict[str, An
         except Exception:
             pass
 
-    # 2A. 上市 (TWSE) 融資融券餘額
     try:
         r2 = requests.get(
             TWSE_MARGIN_URL,
@@ -1114,7 +1118,6 @@ def _fetch_single_day_chip(code: str, d_str: str, roc_date: str) -> dict[str, An
     except Exception:
         pass
 
-    # 2B. 上櫃 (TPEx) 融資融券餘額
     if not found_margin:
         try:
             r2_otc = requests.get(
@@ -1157,7 +1160,7 @@ def _fetch_single_day_chip(code: str, d_str: str, roc_date: str) -> dict[str, An
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chip_data(code: str, date_keys: tuple[str, ...]) -> pd.DataFrame:
-    if not date_keys or code.isalpha():
+    if not date_keys or code.isalpha() or code.startswith("^") or "=" in code:
         return pd.DataFrame()
     target_dates = list(dict.fromkeys(date_keys[-12:]))
     results: list[dict[str, Any]] = []
@@ -1184,7 +1187,7 @@ def fetch_chip_data(code: str, date_keys: tuple[str, ...]) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamental_valuation(code: str, date_key: str) -> dict[str, str]:
-    if not date_key or code.isalpha() or is_etf_code(code):
+    if not date_key or code.isalpha() or is_etf_code(code) or code.startswith("^"):
         return {}
     headers = {"User-Agent": USER_AGENT, "Referer": "https://www.twse.com.tw/"}
     try:
@@ -1435,9 +1438,6 @@ def run_strategy_backtest(
     stop_loss_pct: float = 0.0,
     fee_discount: float = 0.28,
 ) -> dict[str, Any]:
-    """
-    進階波段策略回測引擎（支援硬性停損、夏普比率、盈虧比與凱利公式計算）
-    """
     if df.empty or len(df) < 15:
         return {}
     work = df.copy().reset_index(drop=True)
@@ -1468,7 +1468,6 @@ def run_strategy_backtest(
         px = float(close.iloc[i])
         sig = bool(bull_cond.iloc[i])
 
-        # 檢查硬性停損觸發
         stop_triggered = False
         if position == 1 and stop_loss_pct > 0:
             if (px - entry_price) / entry_price * 100 <= -stop_loss_pct:
@@ -1519,7 +1518,6 @@ def run_strategy_backtest(
     avg_loss = float(np.mean(loss_pnls)) if loss_pnls else 0.0
     profit_factor = (sum(win_pnls) / sum(loss_pnls)) if sum(loss_pnls) > 0 else (9.99 if win_pnls else 0.0)
 
-    # 凱利公式建議倉位 f* = W - (1 - W) / R
     w_prob = win_rate / 100.0
     rr_ratio = (avg_win / avg_loss) if avg_loss > 0 else 1.5
     kelly_pct = max(0.0, min(100.0, (w_prob - (1.0 - w_prob) / rr_ratio) * 100)) if trades > 0 else 0.0
@@ -1586,7 +1584,6 @@ def make_portfolio_df(
         tax_rate = ETF_TAX_RATE if is_etf_code(code) else STOCK_TAX_RATE
         tax = math.floor(market_value * tax_rate)
 
-        # 融資自備款與維持率試算
         if trade_type == "融資":
             loan_amount = cost * MARGIN_LOAN_RATIO_TSE
             self_capital = cost - loan_amount + buy_fee
@@ -1658,7 +1655,140 @@ def make_portfolio_df(
 
 
 # ==============================================================================
-# 8. 專業個股「籌碼K線 + 形態學 + 分價量表 + 進階回測」深度分析組件
+# 8A. 主畫面常駐「大盤即時 K 線面板」組件
+# ==============================================================================
+def render_market_index_kline_panel(quotes: dict[str, dict[str, Any]], key_prefix: str = "home_mkt") -> None:
+    st.markdown('<div class="market-k-panel">', unsafe_allow_html=True)
+    m_c1, m_c2, m_c3 = st.columns([1.45, 1.35, 0.9])
+    sel_mkt_label = m_c1.selectbox(
+        "大盤指數標的",
+        list(MARKET_K_OPTIONS.keys()),
+        label_visibility="collapsed",
+        key=f"mkt_sel_{key_prefix}",
+    )
+    mkt_code = MARKET_K_OPTIONS[sel_mkt_label]
+    mkt_mode = m_c2.selectbox(
+        "大盤K線週期",
+        ["近 30 日 K 線圖", "週 K 線圖", "當日盤中走勢"],
+        label_visibility="collapsed",
+        key=f"mkt_mode_{key_prefix}",
+    )
+    show_mkt_bb = m_c3.toggle("布林", value=False, key=f"mkt_bb_{key_prefix}")
+
+    mq = quotes.get(mkt_code) or fetch_yahoo_single_quote(mkt_code)
+    mp = parse_num(mq.get("z")) or parse_num(mq.get("y"))
+    mprev = parse_num(mq.get("y"))
+    if mp is not None and mprev:
+        md = mp - mprev
+        mpct = md / mprev * 100
+        mcls = "pos" if md >= 0 else "neg"
+        arrow = "▲" if md >= 0 else "▼"
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;align-items:baseline;margin:4px 0 6px;'>"
+            f"<span style='font-size:14px;font-weight:800;'>🌐 {sel_mkt_label}</span>"
+            f"<span class='{mcls}' style='font-family:\"DM Mono\",monospace;font-size:17px;font-weight:800;'>{mp:,.2f} "
+            f"<span style='font-size:12px;'>({arrow} {abs(md):,.2f} / {mpct:+.2f}%)</span></span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    mkt_df = fetch_chart_history(mkt_code, mkt_mode, bars=60)
+    if not mkt_df.empty:
+        fig_m = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.74, 0.26],
+        )
+        if mkt_mode != "當日盤中走勢" and {"開盤", "最高", "最低", "收盤"}.issubset(mkt_df.columns):
+            fig_m.add_trace(
+                go.Candlestick(
+                    x=mkt_df["時間"],
+                    open=mkt_df["開盤"],
+                    high=mkt_df["最高"],
+                    low=mkt_df["最低"],
+                    close=mkt_df["收盤"],
+                    name="大盤K",
+                    increasing=dict(line=dict(color="#ff4d5a"), fillcolor="#ff4d5a"),
+                    decreasing=dict(line=dict(color="#22c55e"), fillcolor="#22c55e"),
+                ),
+                row=1,
+                col=1,
+            )
+            for ma_col, ma_c in [("MA5", "#f5c26b"), ("MA20", "#38bdf8"), ("MA60", "#c084fc")]:
+                if ma_col in mkt_df.columns:
+                    fig_m.add_trace(
+                        go.Scatter(
+                            x=mkt_df["時間"],
+                            y=mkt_df[ma_col],
+                            mode="lines",
+                            name=ma_col,
+                            line=dict(color=ma_c, width=1.2),
+                        ),
+                        row=1,
+                        col=1,
+                    )
+            if show_mkt_bb and {"BB_UPPER", "BB_LOWER"}.issubset(mkt_df.columns):
+                fig_m.add_trace(
+                    go.Scatter(x=mkt_df["時間"], y=mkt_df["BB_UPPER"], name="布林上軌", line=dict(color="rgba(148,163,184,0.5)", dash="dot", width=1)),
+                    row=1,
+                    col=1,
+                )
+                fig_m.add_trace(
+                    go.Scatter(x=mkt_df["時間"], y=mkt_df["BB_LOWER"], name="布林下軌", line=dict(color="rgba(148,163,184,0.5)", dash="dot", width=1)),
+                    row=1,
+                    col=1,
+                )
+            y_min_m = float(mkt_df["最低"].min()) * 0.992
+            y_max_m = float(mkt_df["最高"].max()) * 1.008
+        else:
+            fig_m.add_trace(
+                go.Scatter(
+                    x=mkt_df["時間"],
+                    y=mkt_df["收盤"],
+                    mode="lines",
+                    name="盤中走勢",
+                    line=dict(color="#f5c26b", width=2.0),
+                    fill="tozeroy",
+                    fillcolor="rgba(245,194,107,0.08)",
+                ),
+                row=1,
+                col=1,
+            )
+            y_min_m = float(mkt_df["收盤"].min()) * 0.995
+            y_max_m = float(mkt_df["收盤"].max()) * 1.005
+
+        if "成交張數" in mkt_df.columns:
+            v_cols = ["#ff4d5a" if c >= o else "#22c55e" for c, o in zip(mkt_df["收盤"], mkt_df.get("開盤", mkt_df["收盤"]))]
+            fig_m.add_trace(go.Bar(x=mkt_df["時間"], y=mkt_df["成交張數"], name="量能", marker_color=v_cols), row=2, col=1)
+
+        fig_m.update_layout(
+            height=295,
+            margin=dict(l=4, r=4, t=8, b=4),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(16,18,24,0.65)",
+            font=dict(color="#f3f5fa", family="Noto Sans TC", size=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1, font=dict(size=10)),
+            xaxis=dict(showgrid=False, rangeslider=dict(visible=False)),
+            xaxis2=dict(showgrid=False),
+            yaxis=dict(range=[y_min_m, y_max_m], gridcolor="#1d2029", tickformat=",.0f"),
+            yaxis2=dict(gridcolor="#1d2029"),
+        )
+        st.plotly_chart(fig_m, use_container_width=True, key=f"mkt_fig_{key_prefix}_{mkt_code}_{mkt_mode}_{show_mkt_bb}")
+
+        if mkt_mode != "當日盤中走勢" and {"收盤", "MA20", "MA60", "RSI14"}.issubset(mkt_df.columns):
+            lr = mkt_df.iloc[-1]
+            pos_ma20 = "站上月線 (偏多)" if lr["收盤"] > lr["MA20"] else "跌破月線 (保守)"
+            pos_ma60 = "站上季線 (中多)" if lr["收盤"] > lr["MA60"] else "位於季線下"
+            st.caption(
+                f"📌 大盤位階診斷：MA20 月線 **{lr['MA20']:,.0f}**（{pos_ma20}）｜ MA60 季線 **{lr['MA60']:,.0f}**（{pos_ma60}）｜ 大盤 RSI14 = **{lr['RSI14']:.1f}**"
+            )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 8B. 專業個股「籌碼K線 + RS相對強弱 + 斐波那契 + 當沖損益試算」深度分析組件
 # ==============================================================================
 def render_stock_deep_dive(
     code: str,
@@ -1684,7 +1814,7 @@ def render_stock_deep_dive(
         vol_str = f"{vol_shares:,.0f} 張" if vol_shares is not None else "—"
         st.markdown(
             f'<div class="quote-banner">'
-            f'<div><div class="subtle">個股即時報價</div><div style="font-size:18px;font-weight:800;">{label}</div></div>'
+            f'<div><div class="subtle">查詢個股即時報價</div><div style="font-size:18px;font-weight:800;">{label}</div></div>'
             f'<div><div class="subtle">成交價</div><div class="{cls}" style="font-size:21px;font-family:\'DM Mono\',monospace;font-weight:700;">{price:,.2f}</div></div>'
             f'<div><div class="subtle">漲跌 / 幅度</div><div class="{cls}" style="font-size:14px;font-family:\'DM Mono\',monospace;font-weight:700;">{sign}{delta:,.2f}（{sign}{pct:.2f}%）</div></div>'
             f'<div><div class="subtle">最高 / 最低</div><div style="font-size:13px;font-family:\'DM Mono\',monospace;">{high_str} / {low_str}</div></div>'
@@ -1693,15 +1823,16 @@ def render_stock_deep_dive(
             unsafe_allow_html=True,
         )
 
-    ind_c1, ind_c2, ind_c3 = st.columns([1.15, 1.35, 1.2])
-    show_bb = ind_c1.toggle("疊加布林通道", value=False, key=f"bb_{key_prefix}_{code}")
-    sub_ind = ind_c2.selectbox(
+    ind_c1, ind_c2, ind_c3, ind_c4 = st.columns([1.0, 1.0, 1.3, 1.1])
+    show_bb = ind_c1.toggle("布林通道", value=False, key=f"bb_{key_prefix}_{code}")
+    show_fib = ind_c2.toggle("黃金分割線", value=False, key=f"fib_{key_prefix}_{code}")
+    sub_ind = ind_c3.selectbox(
         "技術副圖",
-        ["MACD (12,26,9)", "KD 隨機指標 (9,3,3)", "RSI 強弱指標 (6/14)", "OBV 能量潮指標"],
+        ["MACD (12,26,9)", "KD 隨機指標 (9,3,3)", "RSI 強弱指標 (6/14)", "RS 相對大盤強弱", "OBV 能量潮指標"],
         label_visibility="collapsed",
         key=f"subind_{key_prefix}_{code}",
     )
-    k_bars = ind_c3.selectbox(
+    k_bars = ind_c4.selectbox(
         "K棒週期",
         [30, 45, 60, 120],
         index=1,
@@ -1765,14 +1896,14 @@ def render_stock_deep_dive(
             vertical_spacing=0.04,
             row_heights=[0.48, 0.16, 0.18, 0.18],
             subplot_titles=(
-                "日K線與均線 (MA5 / MA10 / MA20 / MA60)",
+                "個股K線與均線 (MA5 / MA10 / MA20 / MA60)",
                 "成交量 (張) 與 5日均量",
                 "三大法人買賣超 (外資 / 投信 / 自營商)" if has_chips else "短線 RSI(6) 強弱軌跡",
                 sub_ind,
             ),
         )
 
-        if chart_mode == "近 30 日 K 線圖" and {"開盤", "最高", "最低", "收盤"}.issubset(hist_df.columns):
+        if chart_mode != "當日盤中走勢" and {"開盤", "最高", "最低", "收盤"}.issubset(hist_df.columns):
             fig.add_trace(
                 go.Candlestick(
                     x=hist_df["時間"],
@@ -1780,7 +1911,7 @@ def render_stock_deep_dive(
                     high=hist_df["最高"],
                     low=hist_df["最低"],
                     close=hist_df["收盤"],
-                    name="日K",
+                    name="個股K線",
                     increasing=dict(line=dict(color="#ff4d5a"), fillcolor="#ff4d5a"),
                     decreasing=dict(line=dict(color="#22c55e"), fillcolor="#22c55e"),
                 ),
@@ -1802,13 +1933,7 @@ def render_stock_deep_dive(
                     )
             if show_bb and {"BB_UPPER", "BB_LOWER"}.issubset(hist_df.columns):
                 fig.add_trace(
-                    go.Scatter(
-                        x=hist_df["時間"],
-                        y=hist_df["BB_UPPER"],
-                        mode="lines",
-                        name="布林上軌",
-                        line=dict(color="rgba(148,163,184,0.6)", width=1, dash="dot"),
-                    ),
+                    go.Scatter(x=hist_df["時間"], y=hist_df["BB_UPPER"], mode="lines", name="布林上軌", line=dict(color="rgba(148,163,184,0.6)", width=1, dash="dot")),
                     row=1,
                     col=1,
                 )
@@ -1825,8 +1950,26 @@ def render_stock_deep_dive(
                     row=1,
                     col=1,
                 )
+
             raw_min = float(hist_df["最低"].min())
             raw_max = float(hist_df["最高"].max())
+
+            # 斐波那契黃金分割支撐壓力自動畫線
+            if show_fib and raw_max > raw_min:
+                span = raw_max - raw_min
+                for fib_r, fib_c in [(0.382, "#38bdf8"), (0.500, "#f5c26b"), (0.618, "#c084fc")]:
+                    fib_lvl = raw_max - span * fib_r
+                    fig.add_hline(
+                        y=fib_lvl,
+                        line_dash="dot",
+                        line_color=fib_c,
+                        line_width=1.1,
+                        annotation_text=f"Fib {fib_r:.3f} ({fib_lvl:,.1f})",
+                        annotation_position="bottom right",
+                        annotation_font=dict(color=fib_c, size=10),
+                        row=1,
+                        col=1,
+                    )
         else:
             latest_val = float(hist_df["收盤"].iloc[-1])
             ref_val = cost_price if cost_price is not None else float(hist_df["收盤"].iloc[0])
@@ -1878,13 +2021,7 @@ def render_stock_deep_dive(
             )
             if "VMA5" in hist_df.columns:
                 fig.add_trace(
-                    go.Scatter(
-                        x=hist_df["時間"],
-                        y=hist_df["VMA5"],
-                        mode="lines",
-                        name="5日均量",
-                        line=dict(color="#f5c26b", width=1.1),
-                    ),
+                    go.Scatter(x=hist_df["時間"], y=hist_df["VMA5"], mode="lines", name="5日均量", line=dict(color="#f5c26b", width=1.1)),
                     row=2,
                     col=1,
                 )
@@ -1911,6 +2048,32 @@ def render_stock_deep_dive(
             fig.add_trace(go.Scatter(x=hist_df["時間"], y=hist_df["RSI14"], name="RSI(14)", line=dict(color="#c084fc", width=1.5)), row=4, col=1)
             fig.add_hline(y=70, line_dash="dot", line_color="#ff4d5a", line_width=1, row=4, col=1)
             fig.add_hline(y=30, line_dash="dot", line_color="#22c55e", line_width=1, row=4, col=1)
+        elif sub_ind.startswith("RS"):
+            # 相對大盤超額報酬強弱曲線 (Relative Strength vs ^TWII)
+            bench_df = fetch_chart_history("^TWII", "近 30 日 K 線圖", bars=k_bars)
+            if not bench_df.empty and "日期鍵" in hist_df.columns:
+                merged_rs = pd.merge(
+                    hist_df[["日期鍵", "時間", "收盤"]],
+                    bench_df[["日期鍵", "收盤"]].rename(columns={"收盤": "大盤收盤"}),
+                    on="日期鍵",
+                    how="inner",
+                )
+                if not merged_rs.empty:
+                    stk_norm = merged_rs["收盤"] / merged_rs["收盤"].iloc[0] * 100
+                    mkt_norm = merged_rs["大盤收盤"] / merged_rs["大盤收盤"].iloc[0] * 100
+                    rs_excess = (stk_norm - mkt_norm).round(2)
+                    fig.add_trace(
+                        go.Scatter(
+                            x=merged_rs["時間"],
+                            y=rs_excess,
+                            name="相對大盤超額(%)",
+                            line=dict(color="#f5c26b", width=1.8),
+                            fill="tozeroy",
+                            fillcolor="rgba(245,194,107,0.12)",
+                        ),
+                        row=4,
+                        col=1,
+                    )
         elif "OBV" in hist_df.columns:
             fig.add_trace(go.Scatter(x=hist_df["時間"], y=hist_df["OBV"], name="OBV能量潮", line=dict(color="#38bdf8", width=1.6)), row=4, col=1)
 
@@ -1934,7 +2097,7 @@ def render_stock_deep_dive(
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key=f"chart_{key_prefix}_{code}_{chart_mode}_{sub_ind}_{k_bars}_{show_bb}",
+            key=f"chart_{key_prefix}_{code}_{chart_mode}_{sub_ind}_{k_bars}_{show_bb}_{show_fib}",
         )
     else:
         st.info(f"目前暫無 {label} 的歷史 K 線圖表資料。")
@@ -2010,10 +2173,33 @@ def render_stock_deep_dive(
             av = f"{ob['ask_vols'][idx]:,.0f}" if idx < len(ob["ask_vols"]) else "—"
             rows_ob.append({"委買張數": bv, "委買價": bp, "委賣價": ap, "委賣張數": av})
         st.dataframe(pd.DataFrame(rows_ob), use_container_width=True, hide_index=True)
-    else:
-        st.caption(f"目前為非盤中時段或海外伺服器連線，{label} 暫無即時五檔掛單明細。")
 
-    # 分價量表（籌碼支撐壓力分布圖）
+    # ⚡ 個股專屬「短線／當沖稅費淨損益試算器」
+    if price and price > 0:
+        with st.expander("⚡ 短線／當沖稅費淨損益快速試算器"):
+            dt1, dt2, dt3, dt4 = st.columns([1.1, 1.1, 1.0, 1.0])
+            sim_buy = dt1.number_input("買進價", min_value=0.01, value=float(price), step=0.5, key=f"dt_b_{key_prefix}_{code}")
+            sim_sell = dt2.number_input("目標賣出價", min_value=0.01, value=round(float(price) * 1.02, 2), step=0.5, key=f"dt_s_{key_prefix}_{code}")
+            sim_lots = dt3.number_input("張數", min_value=1, value=1, step=1, key=f"dt_l_{key_prefix}_{code}")
+            is_daytrade = dt4.toggle("當沖證交稅減半", value=True, key=f"dt_flag_{key_prefix}_{code}")
+
+            sh_cnt = int(sim_lots * 1000)
+            disc = float(st.session_state["fee_discount"])
+            b_amt = sim_buy * sh_cnt
+            s_amt = sim_sell * sh_cnt
+            b_f = calc_trade_fee(b_amt, sh_cnt, disc, False)
+            s_f = calc_trade_fee(s_amt, sh_cnt, disc, False)
+            t_rate = ETF_TAX_RATE if is_etf_code(code) else (DAY_TRADE_TAX_RATE if is_daytrade else STOCK_TAX_RATE)
+            t_amt = math.floor(s_amt * t_rate)
+            net_dt = s_amt - b_amt - b_f - s_f - t_amt
+            dt_cls = "pos" if net_dt >= 0 else "neg"
+            st.markdown(
+                f"總交易稅費（買手續費 {b_f:,} + 賣手續費 {s_f:,} + 證交稅 {t_amt:,}）：**{b_f + s_f + t_amt:,} 元** ｜ "
+                f"預估淨損益：<span class='{dt_cls}'><b>{net_dt:+,.0f} 元</b></span>",
+                unsafe_allow_html=True,
+            )
+
+    # 分價量表
     if chart_mode != "當日盤中走勢" and not hist_df.empty:
         with st.expander("📊 分價量表（近波段籌碼密集區 / 支撐壓力判斷）"):
             vp_df, poc_price = compute_volume_profile(hist_df, bins=12)
@@ -2084,9 +2270,17 @@ def render_stock_deep_dive(
                 )
                 st.plotly_chart(fig_bt, use_container_width=True, key=f"bt_chart_{key_prefix}_{code}_{strat_choice}_{bt_sl}")
 
-    with st.expander("💰 歷年現金股利與除息殖利率紀錄"):
+    with st.expander("💰 歷年現金股利與除息殖利率 / 合理價位區間"):
         div_df = fetch_dividend_history(code)
         if not div_df.empty:
+            avg_div = float(div_df.head(5)["現金股利"].mean())
+            if avg_div > 0:
+                cheap_p = avg_div * 16.0     # 6.25% 殖利率
+                fair_p = avg_div * 20.0      # 5.00% 殖利率
+                expensive_p = avg_div * 25.0 # 4.00% 殖利率
+                st.markdown(
+                    f"近 5 年平均股利 **{avg_div:.2f} 元** ｜ 股息估值參考：便宜價(6.25%) **{cheap_p:,.1f}** · 合理價(5%) **{fair_p:,.1f}** · 昂貴價(4%) **{expensive_p:,.1f}**"
+                )
             if price and price > 0:
                 div_df["當期殖利率估算"] = (div_df["現金股利"] / price * 100).round(2).astype(str) + "%"
             st.dataframe(div_df.head(8), use_container_width=True, hide_index=True)
@@ -2116,9 +2310,10 @@ for idx, sec in enumerate(["資產", "台股", "美股", "討論"]):
         st.session_state["show_settings"] = False
         st.rerun()
 
-if top_cols[4].button("🔍", key="top_search_btn", use_container_width=True, help="搜尋個股與籌碼"):
+if top_cols[4].button("🔍", key="top_search_btn", use_container_width=True, help="搜尋個股與籌碼K線"):
     st.session_state["top_section"] = "台股"
-    st.session_state["bottom_tab"] = "自選股"
+    st.session_state["bottom_tab"] = "庫存股"
+    st.session_state["show_home_stock_k"] = not st.session_state["show_home_stock_k"]
     st.rerun()
 
 if top_cols[5].button(
@@ -2173,13 +2368,10 @@ if st.session_state["show_settings"]:
             step=10000,
             key="cfg_cash",
         )
-        st.session_state["margin_interest_rate"] = s6.number_input(
-            "融資年利率（%）",
-            min_value=1.0,
-            max_value=12.0,
-            value=float(st.session_state["margin_interest_rate"]),
-            step=0.1,
-            key="cfg_margin_rate",
+        st.session_state["show_home_market_k"] = s6.toggle(
+            "主畫面常駐大盤 K 線圖",
+            value=bool(st.session_state["show_home_market_k"]),
+            key="cfg_home_mkt_k",
         )
 
         s7, s8 = st.columns(2)
@@ -2232,7 +2424,7 @@ def render_main_terminal() -> None:
     top_sec = st.session_state["top_section"]
     btab = st.session_state["bottom_tab"]
 
-    needed_codes: list[str] = list(current.keys()) + wl + [lookup_code]
+    needed_codes: list[str] = list(current.keys()) + wl + [lookup_code, "^TWII", "^TWOII", "^SOX"]
     if btab == "大盤" or top_sec == "資產":
         needed_codes += list(GLOBAL_INDICES.keys())
     if btab == "焦點股":
@@ -2308,7 +2500,7 @@ def render_main_terminal() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ==========================================================================
-    # 分支 A：頂部主導覽 -> 「資產」總覽、已實現帳本與情境模擬
+    # 分支 A：頂部主導覽 -> 「資產」
     # ==========================================================================
     if top_sec == "資產":
         st.markdown("<div class='section-title'>💼 總資產淨值配置、信用維持率與壓力測試</div>", unsafe_allow_html=True)
@@ -2428,13 +2620,13 @@ def render_main_terminal() -> None:
         return
 
     # ==========================================================================
-    # 分支 B：頂部主導覽 -> 「美股」即時行情與 K 線
+    # 分支 B：頂部主導覽 -> 「美股」
     # ==========================================================================
     if top_sec == "美股":
-        st.markdown("<div class='section-title'>🇺🇸 美股即時行情與技術分析</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>🇺🇸 美股即時行情與專屬 K 線分析</div>", unsafe_allow_html=True)
         u1, u2 = st.columns([2.2, 1])
         us_input = u1.text_input("輸入美股代號", placeholder="例如 NVDA、TSM、AMD、SOXL", label_visibility="collapsed", key="us_search_box")
-        if u2.button("查詢美股", use_container_width=True, type="primary", key="us_search_go"):
+        if u2.button("查詢美股K線", use_container_width=True, type="primary", key="us_search_go"):
             if us_input.strip():
                 st.session_state["us_focus_symbol"] = us_input.strip().upper()
                 st.rerun()
@@ -2463,7 +2655,7 @@ def render_main_terminal() -> None:
         return
 
     # ==========================================================================
-    # 分支 C：頂部主導覽 -> 「討論」筆記、攤平計算機、存股複利與部位風控試算
+    # 分支 C：頂部主導覽 -> 「討論」
     # ==========================================================================
     if top_sec == "討論":
         st.markdown("<div class='section-title'>💬 交易策略備忘錄與量化計算工具箱</div>", unsafe_allow_html=True)
@@ -2520,15 +2712,6 @@ def render_main_terminal() -> None:
             st.markdown(
                 f"累積投入本金：**NT$ {principal_tot:,.0f}** ｜ 期滿預估總資產：**NT$ {fv:,.0f}**（複利增值 **+{fv - principal_tot:,.0f} 元**）"
             )
-
-        st.markdown("<div class='section-title'>🔥 熱門話題標的（點擊一鍵看籌碼K線）</div>", unsafe_allow_html=True)
-        hot_cols = st.columns(4)
-        for idx, (h_code, h_name) in enumerate([("2330", "台積電"), ("8996", "高力"), ("00981A", "主動統一"), ("1815", "富喬")]):
-            if hot_cols[idx].button(f"{h_code} {h_name}", key=f"hot_jump_{h_code}", use_container_width=True):
-                st.session_state["quick_lookup_code"] = h_code
-                st.session_state["top_section"] = "台股"
-                st.session_state["bottom_tab"] = "自選股"
-                st.rerun()
         return
 
     # ==========================================================================
@@ -2537,6 +2720,8 @@ def render_main_terminal() -> None:
 
     # -------------------- 底部 4：大盤 --------------------
     if btab == "大盤":
+        render_market_index_kline_panel(quotes, key_prefix="market_tab")
+
         st.markdown("<div class='section-title'>🌐 全球期指與台股大盤即時行情</div>", unsafe_allow_html=True)
         idx_items = list(GLOBAL_INDICES.items())
         for row_i in range(0, len(idx_items), 2):
@@ -2597,7 +2782,7 @@ def render_main_terminal() -> None:
         st.markdown(html_sec, unsafe_allow_html=True)
         return
 
-    # -------------------- 底部 3：焦點股（含智慧多條件選股掃描器） --------------------
+    # -------------------- 底部 3：焦點股 --------------------
     if btab == "焦點股":
         st.markdown("<div class='section-title'>⭐ 台股熱門族群與焦點股</div>", unsafe_allow_html=True)
         cat_name = st.radio(
@@ -2623,7 +2808,7 @@ def render_main_terminal() -> None:
                 f"<div style='text-align:right;font-family:\"DM Mono\",monospace;' class='{fcls}'><b>{p_txt}</b><br><span style='font-size:11px;'>{d_txt}</span></div>",
                 unsafe_allow_html=True,
             )
-            if fc3.button("看籌碼", key=f"focus_k_{cat_name}_{f_code}", use_container_width=True):
+            if fc3.button("看K線", key=f"focus_k_{cat_name}_{f_code}", use_container_width=True):
                 st.session_state["quick_lookup_code"] = f_code
                 st.session_state["bottom_tab"] = "自選股"
                 st.rerun()
@@ -2724,16 +2909,16 @@ def render_main_terminal() -> None:
 
         with st.expander("📖 籌碼與技術指標實戰百科（點擊展開）", expanded=True):
             st.markdown("""
-- **主力籌碼集中度**：近 5 日三大法人買賣超張數 ÷ 近 5 日總成交張數。通常 **> +10%** 代表籌碼明顯往法人大戶手中集中。
+- **RS 相對大盤強弱指標**：計算「個股漲跌幅 − 加權指數漲跌幅」。曲線持續往上代表該股比大盤更抗跌、更會漲，是選強勢股的核心依據。
+- **斐波那契黃金分割線 (0.382 / 0.5 / 0.618)**：強勢股回檔常在 `0.382` 獲得支撐；一般波段回測則常在 `0.5` 或 `0.618` 出現止跌轉折。
 - **分價量表 (POC 籌碼鐵板區)**：過去一段時間內成交量最大的價格區間。股價站上 POC 代表多數人獲利，回檔時容易形成強勁支撐。
-- **融資維持率與追繳線**：台灣信用交易整戶維持率低於 **130%** 會發出追繳令（Margin Call），當個股融資大減且股價止跌時，常代表浮額清洗完畢。
 - **凱利公式 (Kelly Criterion)**：根據策略歷史勝率與盈虧比計算出的最佳單筆資金投入上限，實戰中常採「半凱利（Half-Kelly）」以降低淨值波動。
             """)
         return
 
-    # -------------------- 底部 2：自選股 --------------------
+    # -------------------- 底部 2：自選股（查詢個股專屬獨立 K 線終端） --------------------
     if btab == "自選股":
-        st.markdown("<div class='section-title'>📈 自選股與籌碼 K 線深度終端</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>📈 查詢股票專屬 K 線與籌碼深度終端</div>", unsafe_allow_html=True)
         q1, q2, q3 = st.columns([1.8, 1.0, 1.0])
         input_code = q1.text_input(
             "輸入代號",
@@ -2743,7 +2928,7 @@ def render_main_terminal() -> None:
             label_visibility="collapsed",
             key="wl_lookup_input",
         )
-        if q2.button("查籌碼K線", use_container_width=True, type="primary", key="wl_search_btn"):
+        if q2.button("查個股K線", use_container_width=True, type="primary", key="wl_search_btn"):
             cleaned = input_code.strip().upper()
             if cleaned and cleaned.isalnum():
                 st.session_state["quick_lookup_code"] = cleaned
@@ -2776,7 +2961,7 @@ def render_main_terminal() -> None:
 
         chart_mode = st.radio(
             "圖表模式",
-            ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"],
+            ["近 30 日 K 線圖", "週 K 線圖", "近 30 日收盤折線", "當日盤中走勢"],
             horizontal=True,
             label_visibility="collapsed",
             key="wl_chart_mode",
@@ -2802,7 +2987,9 @@ def render_main_terminal() -> None:
                 st.rerun()
         return
 
-    # -------------------- 底部 1：庫存股（預設主頁） --------------------
+    # ==========================================================================
+    # -------------------- 底部 1：庫存股（主畫面預設頁） --------------------
+    # ==========================================================================
     tb1, tb2, tb3, tb4 = st.columns([1.25, 0.95, 0.95, 1.85])
     sort_options = ["市值", "今日損益", "總損益"]
     next_sort = sort_options[(sort_options.index(st.session_state["sort_by"]) + 1) % len(sort_options)]
@@ -2824,6 +3011,46 @@ def render_main_terminal() -> None:
         f"<div style='text-align:right;font-size:10px;color:#8b94a7;line-height:1.25;'>上次更新<br>{now_str}</div>",
         unsafe_allow_html=True,
     )
+
+    # 1. 主畫面常駐「大盤即時 K 線圖」
+    if st.session_state.get("show_home_market_k", True):
+        render_market_index_kline_panel(quotes, key_prefix="home_main")
+
+    # 2. 主畫面「快速查詢個股專屬 K 線」工具列與內嵌圖表
+    hq1, hq2, hq3 = st.columns([1.85, 1.0, 1.05])
+    home_q_input = hq1.text_input(
+        "快速查詢個股K線",
+        value=lookup_code,
+        placeholder="輸入台股代號看專屬K線 (如 2330, 8996)",
+        max_chars=8,
+        label_visibility="collapsed",
+        key="home_quick_k_input",
+    )
+    if hq2.button("查個股K線", use_container_width=True, type="primary", key="home_quick_k_go"):
+        c_up = home_q_input.strip().upper()
+        if c_up and c_up.isalnum():
+            st.session_state["quick_lookup_code"] = c_up
+            st.session_state["show_home_stock_k"] = True
+            st.rerun()
+    toggle_lbl = "收合個股K線" if st.session_state["show_home_stock_k"] else "展開個股K線"
+    if hq3.button(toggle_lbl, use_container_width=True, key="home_quick_k_toggle"):
+        st.session_state["show_home_stock_k"] = not st.session_state["show_home_stock_k"]
+        st.rerun()
+
+    if st.session_state["show_home_stock_k"]:
+        with st.container(border=True):
+            active_c = st.session_state.get("quick_lookup_code", "2330").strip().upper()
+            hq_info = quotes.get(active_c) or fetch_yahoo_single_quote(active_c)
+            hq_name = hq_info.get("n") or current.get(active_c, {}).get("name") or active_c
+            h_cost = float(current[active_c]["avg_cost"]) if active_c in current else None
+            h_cmode = st.radio(
+                "個股K線週期",
+                ["近 30 日 K 線圖", "週 K 線圖", "當日盤中走勢"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="home_stock_cmode",
+            )
+            render_stock_deep_dive(active_c, f"{active_c} {hq_name}", hq_info, h_cost, h_cmode, key_prefix="home_embedded")
 
     # ✏️ 互動式庫存新增／修改／融資標記／停損停利編輯面板
     if st.session_state["show_editor"]:
@@ -2918,7 +3145,6 @@ def render_main_terminal() -> None:
                 df = df.sort_values("市值", ascending=False)
 
             total_value = float(df["市值"].sum())
-            total_cost = float(df["投入成本"].sum())
             total_self_cap = float(df["自備款"].sum())
             total_pnl = float(df["未實現損益（元）"].fillna(0).sum())
             total_return = total_pnl / total_self_cap * 100 if total_self_cap else 0.0
@@ -3016,12 +3242,12 @@ def render_main_terminal() -> None:
             jump_cols = st.columns(min(len(df), 4))
             for idx, (_, r) in enumerate(df.head(4).iterrows()):
                 if jump_cols[idx].button(
-                    f"📊 {r['股票代號']} 籌碼K",
+                    f"📊 {r['股票代號']} 專屬K線",
                     key=f"inv_jump_{r['股票代號']}",
                     use_container_width=True,
                 ):
                     st.session_state["quick_lookup_code"] = r["股票代號"]
-                    st.session_state["bottom_tab"] = "自選股"
+                    st.session_state["show_home_stock_k"] = True
                     st.rerun()
         else:
             st.info("目前尚未建立庫存持股，請點擊上方「✏️編輯」新增股票。")
@@ -3133,7 +3359,7 @@ def render_main_terminal() -> None:
             sel_cost = float(df[df["股票代號"] == sel_code].iloc[0]["買進均價"])
             sub_cmode = st.radio(
                 "K線週期",
-                ["近 30 日 K 線圖", "近 30 日收盤折線", "當日盤中走勢"],
+                ["近 30 日 K 線圖", "週 K 線圖", "近 30 日收盤折線", "當日盤中走勢"],
                 horizontal=True,
                 label_visibility="collapsed",
                 key="sub_cmode",
