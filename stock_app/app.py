@@ -23,7 +23,7 @@ import streamlit.components.v1 as components
 # 1. 全域常數、API 端點與系統預設參數 (GLOBAL CONSTANTS & ENDPOINTS)
 # ==============================================================================
 APP_TITLE = "台股・籌碼K線旗艦量化終端"
-APP_VERSION = "v7.1 Yahoo Four-Card + Dual-K Pro"
+APP_VERSION = "v7.2 Yahoo Four-Card White-UI + Dual-K Pro"
 
 TWSE_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -152,17 +152,8 @@ GLOBAL_INDICES: dict[str, tuple[str, str]] = {
     "^N225": ("日經225", "亞股指標"),
 }
 
-SECTOR_PROXIES: dict[str, list[tuple[str, str]]] = {
-    "半導體與晶圓代工": [("2330", "台積電"), ("2454", "聯發科"), ("2303", "聯電")],
-    "AI 伺服器與玻纖布": [("2317", "鴻海"), ("2382", "廣達"), ("1815", "富喬")],
-    "重電綠能與液冷散熱": [("1519", "華城"), ("8996", "高力"), ("3017", "奇鋐")],
-    "貨櫃航運與航空": [("2603", "長榮"), ("2609", "陽明"), ("2618", "長榮航")],
-    "金控壽險與銀行": [("2881", "富邦金"), ("2882", "國泰金"), ("2891", "中信金")],
-    "高股息與市值 ETF": [("0050", "元大台灣50"), ("00878", "國泰永續高股息"), ("00919", "群益精選高息")],
-}
-
 # ==============================================================================
-# 2. 頁面配置與樣式系統 (包含 Yahoo 股市四宮格走勢卡專屬 CSS)
+# 2. 頁面配置與樣式系統 (包含 Yahoo 股市白底四宮格走勢卡專屬 CSS)
 # ==============================================================================
 st.set_page_config(
     page_title=APP_TITLE,
@@ -247,7 +238,7 @@ footer { visibility: hidden; }
     font-weight: 700 !important;
 }
 
-/* Yahoo 股市四宮格即時走勢卡片樣式 (完全對齊截圖視覺) */
+/* Yahoo 股市四宮格即時走勢卡片樣式 (白底高對比版，對齊截圖視覺) */
 .yahoo-mkt-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -261,11 +252,11 @@ footer { visibility: hidden; }
     }
 }
 .yahoo-mkt-card {
-    background: #14171f;
-    border: 1px solid #282d3b;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
     border-radius: 12px;
     padding: 12px 13px 10px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -278,7 +269,7 @@ footer { visibility: hidden; }
 .ym-title {
     font-size: 16px;
     font-weight: 800;
-    color: #f3f5fa;
+    color: #1e293b;
     letter-spacing: 0.02em;
     padding-top: 2px;
 }
@@ -292,6 +283,9 @@ footer { visibility: hidden; }
     line-height: 1.1;
     letter-spacing: -0.02em;
 }
+.ym-price.pos, .ym-change.pos { color: #ef4444 !important; }
+.ym-price.neg, .ym-change.neg { color: #16a34a !important; }
+.ym-price.flat, .ym-change.flat { color: #64748b !important; }
 .ym-change {
     font-family: 'DM Mono', sans-serif;
     font-size: 12.5px;
@@ -300,12 +294,12 @@ footer { visibility: hidden; }
 }
 .ym-vol {
     font-size: 12px;
-    color: #aeb6c7;
+    color: #475569;
     margin-top: 3px;
 }
 .ym-vol b {
     font-family: 'DM Mono', sans-serif;
-    color: #f3f5fa;
+    color: #0f172a;
     font-weight: 700;
 }
 .ym-spark {
@@ -318,8 +312,8 @@ footer { visibility: hidden; }
     grid-template-columns: 1fr 1fr;
     gap: 3px 8px;
     font-size: 11.5px;
-    color: #9aa3b5;
-    border-top: 1px solid #202430;
+    color: #475569;
+    border-top: 1px solid #f1f5f9;
     padding-top: 6px;
 }
 .ym-ohlc span {
@@ -328,7 +322,7 @@ footer { visibility: hidden; }
 }
 .ym-ohlc b {
     font-family: 'DM Mono', sans-serif;
-    color: #e2e8f0;
+    color: #0f172a;
     font-weight: 700;
 }
 
@@ -494,23 +488,6 @@ footer { visibility: hidden; }
     font-family: 'DM Mono', monospace;
     font-size: 11px;
 }
-
-.sector-list {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 12px 14px;
-    margin-top: 8px;
-}
-.sector-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 9px 0;
-    border-bottom: 1px solid #222630;
-    font-size: 13px;
-}
-.sector-item:last-child { border-bottom: none; }
 
 .chip-grid {
     display: grid;
@@ -938,7 +915,8 @@ def build_yahoo_split_sparkline_svg(
     card_idx: int,
 ) -> str:
     """
-    產生與 Yahoo 股市截圖完全一致的「昨收水平虛線 + 紅漲綠跌雙色漸層面積走勢圖 + 末端光點」SVG
+    產生無前導空白縮排的 SVG（昨收水平虛線 + 紅漲綠跌雙色漸層面積走勢圖 + 最新成交光點），
+    確保 Streamlit Markdown 不會誤判為程式碼區塊。
     """
     if not prices or prev_close <= 0:
         return '<svg viewBox="0 0 220 54" width="100%" height="54"></svg>'
@@ -968,7 +946,6 @@ def build_yahoo_split_sparkline_svg(
         y = to_y(val)
         coords.append((x, y))
 
-    # 計算線段在跨越 base_y (昨收線) 時的交點，拆分為紅區(平盤上)與綠區(平盤下)
     dense_pts: list[tuple[float, float]] = [coords[0]]
     for i in range(1, len(coords)):
         x0, y0 = coords[i - 1]
@@ -988,49 +965,24 @@ def build_yahoo_split_sparkline_svg(
 
     last_x, last_y = dense_pts[-1]
     is_up = pts[-1] >= prev_close
-    dot_color = "#ff4d5a" if is_up else "#22c55e"
-
+    dot_color = "#ef4444" if is_up else "#16a34a"
     uid = f"ym_{card_idx}_{int(time.time() * 1000) % 100000}"
-    svg = f"""
-    <svg viewBox="0 0 220 54" preserveAspectRatio="none" width="100%" height="54">
-      <defs>
-        <clipPath id="clip_above_{uid}">
-          <rect x="0" y="0" width="220" height="{base_y:.2f}" />
-        </clipPath>
-        <clipPath id="clip_below_{uid}">
-          <rect x="0" y="{base_y:.2f}" width="220" height="{max(0.0, h - base_y):.2f}" />
-        </clipPath>
-        <linearGradient id="grad_red_{uid}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#ff4d5a" stop-opacity="0.48" />
-          <stop offset="100%" stop-color="#ff4d5a" stop-opacity="0.06" />
-        </linearGradient>
-        <linearGradient id="grad_green_{uid}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#22c55e" stop-opacity="0.06" />
-          <stop offset="100%" stop-color="#22c55e" stop-opacity="0.48" />
-        </linearGradient>
-      </defs>
 
-      <!-- 昨日收盤基準水平虛線 -->
-      <line x1="0" y1="{base_y:.2f}" x2="216" y2="{base_y:.2f}"
-            stroke="#64748b" stroke-width="1.1" stroke-dasharray="2,2" />
-
-      <!-- 平盤之上（紅區填充與紅線） -->
-      <g clip-path="url(#clip_above_{uid})">
-        <path d="{area_d}" fill="url(#grad_red_{uid})" />
-        <path d="{line_d}" fill="none" stroke="#ff4d5a" stroke-width="1.5" stroke-linejoin="round" />
-      </g>
-
-      <!-- 平盤之下（綠區填充與綠線） -->
-      <g clip-path="url(#clip_below_{uid})">
-        <path d="{area_d}" fill="url(#grad_green_{uid})" />
-        <path d="{line_d}" fill="none" stroke="#22c55e" stroke-width="1.5" stroke-linejoin="round" />
-      </g>
-
-      <!-- 最新成交點 -->
-      <circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.7" fill="{dot_color}" />
-    </svg>
-    """
-    return svg.strip()
+    parts = [
+        f'<svg viewBox="0 0 220 54" preserveAspectRatio="none" width="100%" height="54">',
+        f'<defs>',
+        f'<clipPath id="clip_above_{uid}"><rect x="0" y="0" width="220" height="{base_y:.2f}" /></clipPath>',
+        f'<clipPath id="clip_below_{uid}"><rect x="0" y="{base_y:.2f}" width="220" height="{max(0.0, h - base_y):.2f}" /></clipPath>',
+        f'<linearGradient id="grad_red_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444" stop-opacity="0.45" /><stop offset="100%" stop-color="#ef4444" stop-opacity="0.06" /></linearGradient>',
+        f'<linearGradient id="grad_green_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#16a34a" stop-opacity="0.06" /><stop offset="100%" stop-color="#16a34a" stop-opacity="0.45" /></linearGradient>',
+        f'</defs>',
+        f'<line x1="0" y1="{base_y:.2f}" x2="216" y2="{base_y:.2f}" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,2" />',
+        f'<g clip-path="url(#clip_above_{uid})"><path d="{area_d}" fill="url(#grad_red_{uid})" /><path d="{line_d}" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linejoin="round" /></g>',
+        f'<g clip-path="url(#clip_below_{uid})"><path d="{area_d}" fill="url(#grad_green_{uid})" /><path d="{line_d}" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-linejoin="round" /></g>',
+        f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.7" fill="{dot_color}" />',
+        f'</svg>',
+    ]
+    return "".join(parts)
 
 
 def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -1880,7 +1832,6 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
         high_p = parse_num(raw_mis.get("h")) or parse_num(raw_y.get("h")) or price
         low_p = parse_num(raw_mis.get("l")) or parse_num(raw_y.get("l")) or price
 
-        # TWSE MIS 指數成交金額單位通常為「百萬元」，換算為「億元」
         raw_amt = parse_num(raw_mis.get("v"))
         amt_yi = (raw_amt / 100.0) if (raw_amt is not None and raw_amt > 0) else 0.0
 
@@ -1898,7 +1849,6 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
             l_str = f"{low_p:,.2f}" if low_p else p_str
             vol_str = f"{amt_yi:,.2f} 億" if amt_yi > 0 else "即時連線中"
 
-            # 走勢曲線點列：上市/電子/金融優先取各自盤中累積點列或大盤走勢並校準當前點位
             mem_pts = [x["收盤"] for x in st.session_state["intraday_history"].get(mis_key, [])]
             if len(mem_pts) >= 5:
                 spark_pts = mem_pts
@@ -1919,31 +1869,33 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
             o_str = y_str = h_str = l_str = "—"
             svg_html = '<svg viewBox="0 0 220 54" width="100%" height="54"></svg>'
 
-        cards_html.append(f"""
-        <div class="yahoo-mkt-card">
-            <div>
-                <div class="ym-top">
-                    <div class="ym-title">{title}</div>
-                    <div class="ym-right">
-                        <div class="ym-price {cls}">{p_str}</div>
-                        <div class="ym-change {cls}">{chg_str}</div>
-                        <div class="ym-vol">成交 <b>{vol_str}</b></div>
-                    </div>
-                </div>
-                <div class="ym-spark">{svg_html}</div>
-            </div>
-            <div class="ym-ohlc">
-                <span>開盤 <b>{o_str}</b></span>
-                <span>昨收 <b>{y_str}</b></span>
-                <span>最高 <b>{h_str}</b></span>
-                <span>最低 <b>{l_str}</b></span>
-            </div>
-        </div>
-        """)
+        # 無前導空白縮排串接，確保 HTML 完整渲染而非顯示成原始碼
+        card_str = (
+            f'<div class="yahoo-mkt-card">'
+            f'<div>'
+            f'<div class="ym-top">'
+            f'<div class="ym-title">{title}</div>'
+            f'<div class="ym-right">'
+            f'<div class="ym-price {cls}">{p_str}</div>'
+            f'<div class="ym-change {cls}">{chg_str}</div>'
+            f'<div class="ym-vol">成交 <b>{vol_str}</b></div>'
+            f'</div>'
+            f'</div>'
+            f'<div class="ym-spark">{svg_html}</div>'
+            f'</div>'
+            f'<div class="ym-ohlc">'
+            f'<span>開盤 <b>{o_str}</b></span>'
+            f'<span>昨收 <b>{y_str}</b></span>'
+            f'<span>最高 <b>{h_str}</b></span>'
+            f'<span>最低 <b>{l_str}</b></span>'
+            f'</div>'
+            f'</div>'
+        )
+        cards_html.append(card_str)
     cards_html.append("</div>")
-    st.markdown("\n".join(cards_html), unsafe_allow_html=True)
+    st.markdown("".join(cards_html), unsafe_allow_html=True)
 
-    # 卡片下方提供一鍵切換「加權 / 櫃買 / 費半 日K線展開」按鈕列
+    # 卡片下方提供一鍵切換「加權 / 櫃買 / 費半 / 那指期 日K線展開」按鈕列
     kc1, kc2, kc3, kc4 = st.columns(4)
     idx_btns = [
         ("📊 上市日K線", "^TWII", kc1),
@@ -2092,19 +2044,20 @@ def render_stock_deep_dive(
         atr_badge = f" · ATR移動停損參考 <b>{atr_stop:,.2f}</b>" if atr_stop > 0 else ""
         reasons_html = "".join(f"<span class='signal-pill sig-info'>{rs}</span>" for rs in q_score["reasons"])
         patterns_html = "".join(f"<span class='signal-pill sig-pat'>{pt}</span>" for pt in patterns)
-        st.markdown(f"""
-        <div class="score-banner">
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
-                <div>
-                    <span style="font-size:13px;font-weight:700;">🎯 多因子量化總評：</span>
-                    <span class="{q_score['rating_cls']}" style="font-family:'DM Mono',monospace;font-size:19px;font-weight:800;">{q_score['total']} / 100 分</span>
-                    <span class="badge" style="margin-left:6px;">{q_score['rating']}</span>
-                </div>
-                <div class="subtle">趨勢 {q_score['trend']}/25 · 動能 {q_score['momentum']}/25 · 法人 {q_score['chip']}/25 · 資券 {q_score['margin']}/15 · 大單 {q_score['orderbook']}/10{val_badge}{atr_badge}</div>
-            </div>
-            <div style="margin-top:6px;">{patterns_html}{reasons_html}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        score_banner_html = (
+            f'<div class="score-banner">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">'
+            f'<div>'
+            f'<span style="font-size:13px;font-weight:700;">🎯 多因子量化總評：</span>'
+            f'<span class="{q_score["rating_cls"]}" style="font-family:\'DM Mono\',monospace;font-size:19px;font-weight:800;">{q_score["total"]} / 100 分</span>'
+            f'<span class="badge" style="margin-left:6px;">{q_score["rating"]}</span>'
+            f'</div>'
+            f'<div class="subtle">趨勢 {q_score["trend"]}/25 · 動能 {q_score["momentum"]}/25 · 法人 {q_score["chip"]}/25 · 資券 {q_score["margin"]}/15 · 大單 {q_score["orderbook"]}/10{val_badge}{atr_badge}</div>'
+            f'</div>'
+            f'<div style="margin-top:6px;">{patterns_html}{reasons_html}</div>'
+            f'</div>'
+        )
+        st.markdown(score_banner_html, unsafe_allow_html=True)
 
     if not hist_df.empty:
         has_chips = not chip_df.empty
@@ -2637,7 +2590,6 @@ def render_main_terminal() -> None:
     now_str = now_dt.strftime("%Y/%m/%d %H:%M:%S")
     time_short = now_dt.strftime("%H:%M:%S")
 
-    # 記錄四宮格即時指數點位供走勢圖累加
     twse_idx_now = fetch_twse_four_indices()
     for m_key, m_row in twse_idx_now.items():
         mp_live = parse_num(m_row.get("z")) or parse_num(m_row.get("y"))
@@ -3155,25 +3107,25 @@ def render_main_terminal() -> None:
                 tt_badge = f'<span class="badge-margin">資 {row["維持率"]:.0f}%</span>' if tt == "融資" else '<span class="badge">現</span>'
                 alert_badge = f'<span class="badge-warn">{row["警示"]}</span>' if row["警示"] else ""
 
-                html_items += f"""
-                <div class="inventory-item">
-                    <div class="name-col">
-                        <span class="title">{name}</span>
-                        <span class="sub">{tt_badge} {code} · 兩平 {be_price:,.2f} {alert_badge}</span>
-                    </div>
-                    <div class="data-col {cls_d}">
-                        <div class="val">{daily_pnl_str}</div>
-                    </div>
-                    <div class="data-col">
-                        {price_html}
-                        <div class="sub {cls_delta}">{pct_str}</div>
-                    </div>
-                    <div class="data-col {cls_p}">
-                        <div class="val">{pnl_str}</div>
-                        <div class="sub">{ret_str}</div>
-                    </div>
-                </div>
-                """
+                html_items += (
+                    f'<div class="inventory-item">'
+                    f'<div class="name-col">'
+                    f'<span class="title">{name}</span>'
+                    f'<span class="sub">{tt_badge} {code} · 兩平 {be_price:,.2f} {alert_badge}</span>'
+                    f'</div>'
+                    f'<div class="data-col {cls_d}">'
+                    f'<div class="val">{daily_pnl_str}</div>'
+                    f'</div>'
+                    f'<div class="data-col">'
+                    f'{price_html}'
+                    f'<div class="sub {cls_delta}">{pct_str}</div>'
+                    f'</div>'
+                    f'<div class="data-col {cls_p}">'
+                    f'<div class="val">{pnl_str}</div>'
+                    f'<div class="sub">{ret_str}</div>'
+                    f'</div>'
+                    f'</div>'
+                )
             st.markdown(html_items, unsafe_allow_html=True)
 
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
