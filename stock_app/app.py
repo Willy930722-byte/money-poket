@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import json
 import math
 import time
+from typing import Any
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
-from datetime import datetime, timedelta
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ import streamlit.components.v1 as components
 # 1. 全域常數、API 端點與系統預設參數 (GLOBAL CONSTANTS & ENDPOINTS)
 # ==============================================================================
 APP_TITLE = "台股・籌碼K線旗艦量化終端"
-APP_VERSION = "v5.0 Institutional Pro"
+APP_VERSION = "v6.0 Ultra Quant Pro"
 
 TWSE_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -44,18 +44,23 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# 台灣證券交易稅率與手續費基準
+# 台灣證券交易稅率、融資成數與手續費基準
 BASE_FEE_RATE = 0.001425
 STOCK_TAX_RATE = 0.003
 ETF_TAX_RATE = 0.001
 DAY_TRADE_TAX_RATE = 0.0015
 MIN_FEE_NTD = 20
+ODD_LOT_MIN_FEE_NTD = 1
+MARGIN_LOAN_RATIO_TSE = 0.60   # 上市融資成數 6 成 (自備 4 成)
+MARGIN_MAINTENANCE_WARN = 140.0
+MARGIN_MAINTENANCE_CALL = 130.0
 
 DEFAULT_PORTFOLIO: dict[str, dict[str, Any]] = {
     "00981A": {
         "avg_cost": 20.40,
         "shares": 1000,
         "name": "主動統一台股增長",
+        "trade_type": "現股",
         "stop_loss": 18.50,
         "take_profit": 24.00,
         "note": "主動式台股成長配置",
@@ -64,6 +69,7 @@ DEFAULT_PORTFOLIO: dict[str, dict[str, Any]] = {
         "avg_cost": 1300.00,
         "shares": 500,
         "name": "高力",
+        "trade_type": "現股",
         "stop_loss": 1100.00,
         "take_profit": 1500.00,
         "note": "液冷散熱與燃料電池",
@@ -72,13 +78,14 @@ DEFAULT_PORTFOLIO: dict[str, dict[str, Any]] = {
         "avg_cost": 178.50,
         "shares": 2000,
         "name": "元大台灣50",
+        "trade_type": "現股",
         "stop_loss": 165.00,
         "take_profit": 210.00,
         "note": "核心大盤市值部位",
     },
 }
 
-DEFAULT_WATCHLIST: list[str] = ["2330", "2317", "2454", "2603", "00878", "8996"]
+DEFAULT_WATCHLIST: list[str] = ["2330", "2317", "2454", "2603", "00878", "8996", "1815", "2303"]
 
 FOCUS_CATEGORIES: dict[str, list[tuple[str, str]]] = {
     "權值電子": [
@@ -89,11 +96,11 @@ FOCUS_CATEGORIES: dict[str, list[tuple[str, str]]] = {
         ("2303", "聯電"),
         ("3711", "日月光投控"),
     ],
-    "AI 伺服器": [
+    "AI 伺服器與PCB": [
         ("2382", "廣達"),
         ("3231", "緯創"),
         ("6669", "緯穎"),
-        ("2356", "英業達"),
+        ("1815", "富喬"),
         ("3017", "奇鋐"),
         ("3324", "雙鴻"),
     ],
@@ -142,7 +149,7 @@ GLOBAL_INDICES: dict[str, tuple[str, str]] = {
 
 SECTOR_PROXIES: dict[str, list[tuple[str, str]]] = {
     "半導體與晶圓代工": [("2330", "台積電"), ("2454", "聯發科"), ("2303", "聯電")],
-    "AI 伺服器與機殼": [("2317", "鴻海"), ("2382", "廣達"), ("3231", "緯創")],
+    "AI 伺服器與玻纖布": [("2317", "鴻海"), ("2382", "廣達"), ("1815", "富喬")],
     "重電綠能與液冷散熱": [("1519", "華城"), ("8996", "高力"), ("3017", "奇鋐")],
     "貨櫃航運與航空": [("2603", "長榮"), ("2609", "陽明"), ("2618", "長榮航")],
     "金控壽險與銀行": [("2881", "富邦金"), ("2882", "國泰金"), ("2891", "中信金")],
@@ -177,6 +184,7 @@ st.markdown("""
     --cyan: #38bdf8;
     --gold: #f5c26b;
     --gold-bg: rgba(245, 194, 107, 0.14);
+    --purple: #c084fc;
 }
 
 .stApp {
@@ -187,7 +195,7 @@ st.markdown("""
 
 .block-container {
     padding: 0.75rem 0.75rem 5.5rem !important;
-    max-width: 1120px !important;
+    max-width: 1160px !important;
     margin: 0 auto !important;
 }
 
@@ -195,7 +203,6 @@ st.markdown("""
 header[data-testid="stHeader"] { display: none; }
 footer { visibility: hidden; }
 
-/* 強制手機窄螢幕下橫向按鈕列保持單行不換行，呈現原生 App 導覽質感 */
 [data-testid="stHorizontalBlock"] {
     flex-wrap: nowrap !important;
     gap: 5px !important;
@@ -233,7 +240,6 @@ footer { visibility: hidden; }
     font-weight: 700 !important;
 }
 
-/* 三大核心損益總覽卡片 */
 .metric-cards-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -268,10 +274,9 @@ footer { visibility: hidden; }
     color: var(--muted);
 }
 
-/* 庫存股清單表格 */
 .inventory-header {
     display: grid;
-    grid-template-columns: 2.2fr 1fr 1.1fr 1.1fr;
+    grid-template-columns: 2.25fr 1fr 1.1fr 1.1fr;
     gap: 4px;
     padding: 9px 6px;
     font-size: 11px;
@@ -283,7 +288,7 @@ footer { visibility: hidden; }
 }
 .inventory-item {
     display: grid;
-    grid-template-columns: 2.2fr 1fr 1.1fr 1.1fr;
+    grid-template-columns: 2.25fr 1fr 1.1fr 1.1fr;
     gap: 4px;
     padding: 11px 6px;
     border-bottom: 1px solid #1b1e27;
@@ -319,6 +324,15 @@ footer { visibility: hidden; }
     padding: 1px 4px;
     border: 1px solid #323847;
     font-weight: 600;
+}
+.badge-margin {
+    background: rgba(192, 132, 252, 0.16);
+    color: var(--purple);
+    border: 1px solid rgba(192, 132, 252, 0.45);
+    border-radius: 3px;
+    font-size: 9px;
+    padding: 1px 4px;
+    font-weight: 700;
 }
 .badge-warn {
     background: rgba(245, 194, 107, 0.16);
@@ -486,6 +500,7 @@ footer { visibility: hidden; }
 .sig-bull { background: var(--red-bg); color: var(--red); border: 1px solid rgba(255,77,90,0.4); }
 .sig-bear { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,0.4); }
 .sig-info { background: rgba(56,189,248,0.14); color: var(--cyan); border: 1px solid rgba(56,189,248,0.35); }
+.sig-pat  { background: rgba(192,132,252,0.16); color: var(--purple); border: 1px solid rgba(192,132,252,0.4); }
 
 .stTextInput input, .stNumberInput input, .stTextArea textarea, .stSelectbox > div > div {
     background: var(--panel) !important;
@@ -516,11 +531,13 @@ STATE_DEFAULTS: dict[str, Any] = {
     "sort_by": "市值",
     "auto_refresh": True,
     "refresh_freq": 10,
-    "fee_discount": 0.60,       # 券商手續費折數（預設 6 折，可設 0.28 等）
-    "cash_balance": 100000,     # 交割戶可用現金餘額
+    "fee_discount": 0.28,       # 券商電子下單預設 28 折
+    "odd_lot_min_fee": True,    # 零股手續費最低 1 元優惠
+    "cash_balance": 150000,     # 交割戶可用現金餘額
+    "margin_interest_rate": 6.45,  # 融資年利率 (%)
     "whale_min_wan": 200,       # 五檔大戶單金額門檻（萬元）
     "whale_min_lots": 30,       # 五檔大戶單張數門檻（張）
-    "realized_trades": [],      # 已實現損益交易帳本
+    "realized_trades": [],      # 已實現損益與配息帳本
     "user_notes": (
         "・2330 觀察外資與投信同步買超力道，沿 5 日線操作\n"
         "・00981A 波段核心持股，逢回分批布局\n"
@@ -556,6 +573,7 @@ def encode_portfolio(data: dict[str, dict[str, Any]]) -> str:
             round(float(v.get("stop_loss", 0.0)), 2),
             round(float(v.get("take_profit", 0.0)), 2),
             str(v.get("note", "")),
+            str(v.get("trade_type", "現股")),
         ]
         for k, v in data.items()
     }
@@ -576,6 +594,7 @@ def decode_portfolio(token: str) -> dict[str, dict[str, Any]] | None:
                 "stop_loss": float(vals[3]) if len(vals) >= 4 else 0.0,
                 "take_profit": float(vals[4]) if len(vals) >= 5 else 0.0,
                 "note": str(vals[5]) if len(vals) >= 6 else "",
+                "trade_type": str(vals[6]) if len(vals) >= 7 and vals[6] else "現股",
             }
     return restored
 
@@ -689,6 +708,13 @@ def is_etf_code(code: str) -> bool:
     return code.startswith("00")
 
 
+def calc_trade_fee(amount: float, shares: int, fee_discount: float, odd_lot_min_1: bool = True) -> int:
+    if amount <= 0 or shares <= 0:
+        return 0
+    min_fee = ODD_LOT_MIN_FEE_NTD if (odd_lot_min_1 and shares < 1000) else MIN_FEE_NTD
+    return max(min_fee, math.floor(amount * BASE_FEE_RATE * fee_discount))
+
+
 def fetch_yahoo_single_quote(code: str) -> dict[str, Any]:
     headers = {"User-Agent": USER_AGENT}
     is_global_or_us = code.isalpha() or "=" in code or "^" in code
@@ -783,7 +809,7 @@ def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[st
 
 
 # ==============================================================================
-# 5. 全方位技術指標運算引擎 (MA / 布林 / MACD / KD / RSI / ATR / OBV)
+# 5. 全方位技術指標與 K 線形態辨識引擎 (MA / 布林 / MACD / KD / RSI / ATR / 形態學)
 # ==============================================================================
 def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "收盤" not in df.columns:
@@ -793,14 +819,12 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     high = out["最高"].astype(float) if "最高" in out.columns else close
     low = out["最低"].astype(float) if "最低" in out.columns else close
 
-    # 移動平均線 (MA5, MA10, MA20, MA60, MA120)
     out["MA5"] = close.rolling(5, min_periods=1).mean().round(2)
     out["MA10"] = close.rolling(10, min_periods=1).mean().round(2)
     out["MA20"] = close.rolling(20, min_periods=1).mean().round(2)
     out["MA60"] = close.rolling(60, min_periods=1).mean().round(2)
     out["MA120"] = close.rolling(120, min_periods=1).mean().round(2)
 
-    # 布林通道 Bollinger Bands (20, 2) 與通道寬度 %B
     std20 = close.rolling(20, min_periods=2).std().fillna(0)
     out["BB_MID"] = out["MA20"]
     out["BB_UPPER"] = (out["BB_MID"] + 2.0 * std20).round(2)
@@ -808,14 +832,12 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bb_span = (out["BB_UPPER"] - out["BB_LOWER"]).replace(0, np.nan)
     out["BB_PCT_B"] = ((close - out["BB_LOWER"]) / bb_span * 100).fillna(50.0).round(1)
 
-    # MACD (12, 26, 9)
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     out["DIF"] = (ema12 - ema26).round(3)
     out["DEA"] = out["DIF"].ewm(span=9, adjust=False).mean().round(3)
     out["MACD_HIST"] = ((out["DIF"] - out["DEA"]) * 2).round(3)
 
-    # KD 隨機指標 (9, 3, 3)
     low9 = low.rolling(9, min_periods=1).min()
     high9 = high.rolling(9, min_periods=1).max()
     denom = (high9 - low9).replace(0, np.nan)
@@ -830,7 +852,6 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["K"] = np.round(k_vals, 2)
     out["D"] = np.round(d_vals, 2)
 
-    # RSI (6 & 14)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = (-delta).clip(lower=0)
@@ -839,15 +860,10 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["RSI6"] = (100 - (100 / (1 + rs6))).fillna(50.0).round(2)
     out["RSI14"] = (100 - (100 / (1 + rs14))).fillna(50.0).round(2)
 
-    # ATR (14 日真實波幅，用於計算移動停損距離)
     prev_close = close.shift(1).fillna(close)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     out["ATR14"] = tr.rolling(14, min_periods=1).mean().round(2)
 
-    # 成交量均線與 OBV 能量潮
     if "成交張數" in out.columns:
         vol = out["成交張數"].astype(float)
         out["VMA5"] = vol.rolling(5, min_periods=1).mean().round(0)
@@ -856,6 +872,75 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         out["OBV"] = (obv_sign * vol).cumsum().round(0)
 
     return out
+
+
+def detect_candlestick_patterns(df: pd.DataFrame) -> list[str]:
+    """
+    自動辨識近 3 日 K 線組合與均線/指標型態
+    """
+    patterns: list[str] = []
+    if df.empty or len(df) < 5 or not {"開盤", "最高", "最低", "收盤"}.issubset(df.columns):
+        return patterns
+
+    r0 = df.iloc[-1]
+    r1 = df.iloc[-2]
+    r2 = df.iloc[-3]
+
+    # 1. 紅三兵 (連續三日收紅且收盤逐日墊高)
+    if (r0["收盤"] > r0["開盤"]) and (r1["收盤"] > r1["開盤"]) and (r2["收盤"] > r2["開盤"]):
+        if r0["收盤"] > r1["收盤"] > r2["收盤"]:
+            patterns.append("🔥 紅三兵多頭推進")
+
+    # 2. 多頭吞噬 (前日黑K，今日紅K實體包覆前日實體)
+    if (r1["收盤"] < r1["開盤"]) and (r0["收盤"] > r0["開盤"]):
+        if r0["開盤"] <= r1["收盤"] and r0["收盤"] >= r1["開盤"]:
+            patterns.append("⚡ 多頭吞噬轉強")
+
+    # 3. 帶量長紅突破月線
+    if "MA20" in df.columns and "VMA5" in df.columns and "成交張數" in df.columns:
+        if r1["收盤"] < r1["MA20"] and r0["收盤"] > r0["MA20"] and r0["成交張數"] > r0["VMA5"] * 1.3:
+            patterns.append("🚀 帶量長紅突破月線")
+
+    # 4. 均線三線糾結 (MA5, MA10, MA20 乖離極小)
+    if {"MA5", "MA10", "MA20"}.issubset(df.columns) and r0["收盤"] > 0:
+        ma_spread = (max(r0["MA5"], r0["MA10"], r0["MA20"]) - min(r0["MA5"], r0["MA10"], r0["MA20"])) / r0["收盤"]
+        if ma_spread <= 0.015:
+            patterns.append("🎯 三線糾結變盤前夕")
+
+    # 5. KD 低檔黃金交叉
+    if {"K", "D"}.issubset(df.columns):
+        if r1["K"] <= r1["D"] and r0["K"] > r0["D"] and r0["K"] < 35:
+            patterns.append("💎 KD 低檔黃金交叉")
+
+    return patterns
+
+
+def compute_volume_profile(df: pd.DataFrame, bins: int = 12) -> tuple[pd.DataFrame, float]:
+    """
+    計算分價量表 (Volume Profile) 與最大籌碼密集價位 (POC)
+    """
+    if df.empty or not {"收盤", "成交張數"}.issubset(df.columns):
+        return pd.DataFrame(), 0.0
+    low_p = float(df["最低"].min()) if "最低" in df.columns else float(df["收盤"].min())
+    high_p = float(df["最高"].max()) if "最高" in df.columns else float(df["收盤"].max())
+    if high_p <= low_p:
+        return pd.DataFrame(), high_p
+
+    edges = np.linspace(low_p, high_p, bins + 1)
+    labels = [f"{edges[i]:,.1f}~{edges[i+1]:,.1f}" for i in range(bins)]
+    mids = [(edges[i] + edges[i + 1]) / 2.0 for i in range(bins)]
+    vols = np.zeros(bins)
+
+    for _, row in df.iterrows():
+        px = float(row["收盤"])
+        v = float(row["成交張數"])
+        idx = min(bins - 1, max(0, int((px - low_p) / (high_p - low_p) * bins)))
+        vols[idx] += v
+
+    vp_df = pd.DataFrame({"價格區間": labels, "中位價": mids, "累積張數": np.round(vols, 0)})
+    poc_idx = int(np.argmax(vols))
+    poc_price = round(float(mids[poc_idx]), 2)
+    return vp_df, poc_price
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -1170,7 +1255,7 @@ def fetch_stock_news(keywords: tuple[str, ...]) -> list[dict[str, str]]:
 
 
 # ==============================================================================
-# 7. 五檔大戶分析、多因子量化評分、歷史策略回測與損益運算引擎
+# 7. 五檔大戶分析、多因子量化評分、進階歷史策略回測與信用維持率引擎
 # ==============================================================================
 def parse_order_book(quote: dict[str, Any], whale_wan: float = 200.0, whale_lots: int = 30) -> dict[str, Any]:
     def split_nums(raw: Any) -> list[float]:
@@ -1237,14 +1322,6 @@ def compute_stock_quant_score(
     chip_df: pd.DataFrame,
     ob_info: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    五維度多因子量化評分模型 (滿分 100 分)：
-    1. 均線趨勢力 (25分)
-    2. 技術動能指標 (25分)
-    3. 法人籌碼買盤 (25分)
-    4. 資券籌碼安定度 (15分)
-    5. 五檔大戶委買結構 (10分)
-    """
     trend_score = 12
     mom_score = 12
     chip_score = 12
@@ -1351,9 +1428,15 @@ def compute_stock_quant_score(
     }
 
 
-def run_strategy_backtest(df: pd.DataFrame, strategy_name: str, initial_capital: float = 1_000_000.0) -> dict[str, Any]:
+def run_strategy_backtest(
+    df: pd.DataFrame,
+    strategy_name: str,
+    initial_capital: float = 1_000_000.0,
+    stop_loss_pct: float = 0.0,
+    fee_discount: float = 0.28,
+) -> dict[str, Any]:
     """
-    歷史波段策略回測引擎（考慮台灣交易手續費與證交稅成本）
+    進階波段策略回測引擎（支援硬性停損、夏普比率、盈虧比與凱利公式計算）
     """
     if df.empty or len(df) < 15:
         return {}
@@ -1366,6 +1449,8 @@ def run_strategy_backtest(df: pd.DataFrame, strategy_name: str, initial_capital:
         bull_cond = work["K"] > work["D"]
     elif strategy_name == "MACD 紅柱動能波段 (DIF>DEA)":
         bull_cond = work["DIF"] > work["DEA"]
+    elif strategy_name == "RSI 強勢動能順勢 (RSI14>55)":
+        bull_cond = work["RSI14"] > 55
     else:
         bull_cond = close > work["BB_MID"]
 
@@ -1375,29 +1460,41 @@ def run_strategy_backtest(df: pd.DataFrame, strategy_name: str, initial_capital:
     entry_price = 0.0
     trades = 0
     wins = 0
+    win_pnls: list[float] = []
+    loss_pnls: list[float] = []
     equity_curve = []
 
     for i in range(len(work)):
         px = float(close.iloc[i])
         sig = bool(bull_cond.iloc[i])
+
+        # 檢查硬性停損觸發
+        stop_triggered = False
+        if position == 1 and stop_loss_pct > 0:
+            if (px - entry_price) / entry_price * 100 <= -stop_loss_pct:
+                stop_triggered = True
+
         if sig and position == 0:
-            # 全倉買進（整股 1000 股為單位）
-            lots = int(cash // (px * 1000 * (1 + BASE_FEE_RATE * 0.6)))
+            lots = int(cash // (px * 1000 * (1 + BASE_FEE_RATE * fee_discount)))
             if lots >= 1:
                 shares = lots * 1000
                 cost = shares * px
-                fee = max(MIN_FEE_NTD, round(cost * BASE_FEE_RATE * 0.6))
+                fee = max(MIN_FEE_NTD, math.floor(cost * BASE_FEE_RATE * fee_discount))
                 cash -= (cost + fee)
                 entry_price = px
                 position = 1
                 trades += 1
-        elif (not sig) and position == 1:
+        elif ((not sig) or stop_triggered) and position == 1:
             proceeds = shares * px
-            fee = max(MIN_FEE_NTD, round(proceeds * BASE_FEE_RATE * 0.6))
-            tax = round(proceeds * STOCK_TAX_RATE)
+            fee = max(MIN_FEE_NTD, math.floor(proceeds * BASE_FEE_RATE * fee_discount))
+            tax = math.floor(proceeds * STOCK_TAX_RATE)
+            net_trade = (proceeds - fee - tax) - (shares * entry_price)
             cash += (proceeds - fee - tax)
-            if px > entry_price:
+            if net_trade > 0:
                 wins += 1
+                win_pnls.append(net_trade)
+            else:
+                loss_pnls.append(abs(net_trade))
             shares = 0
             position = 0
 
@@ -1405,12 +1502,27 @@ def run_strategy_backtest(df: pd.DataFrame, strategy_name: str, initial_capital:
         equity_curve.append(total_eq)
 
     eq_series = pd.Series(equity_curve)
+    daily_rets = eq_series.pct_change().dropna()
+    sharpe = (
+        float((daily_rets.mean() / daily_rets.std()) * math.sqrt(252))
+        if (not daily_rets.empty and daily_rets.std() > 0)
+        else 0.0
+    )
     tot_ret = (eq_series.iloc[-1] - initial_capital) / initial_capital * 100
     bh_ret = (close.iloc[-1] - close.iloc[0]) / close.iloc[0] * 100
     roll_max = eq_series.cummax()
     drawdown = (eq_series - roll_max) / roll_max * 100
     max_dd = float(drawdown.min())
     win_rate = (wins / trades * 100) if trades > 0 else 0.0
+
+    avg_win = float(np.mean(win_pnls)) if win_pnls else 0.0
+    avg_loss = float(np.mean(loss_pnls)) if loss_pnls else 0.0
+    profit_factor = (sum(win_pnls) / sum(loss_pnls)) if sum(loss_pnls) > 0 else (9.99 if win_pnls else 0.0)
+
+    # 凱利公式建議倉位 f* = W - (1 - W) / R
+    w_prob = win_rate / 100.0
+    rr_ratio = (avg_win / avg_loss) if avg_loss > 0 else 1.5
+    kelly_pct = max(0.0, min(100.0, (w_prob - (1.0 - w_prob) / rr_ratio) * 100)) if trades > 0 else 0.0
 
     work["策略淨值"] = eq_series.round(0)
     work["買進持有淨值"] = (initial_capital * (close / close.iloc[0])).round(0)
@@ -1421,6 +1533,9 @@ def run_strategy_backtest(df: pd.DataFrame, strategy_name: str, initial_capital:
         "total_return": round(tot_ret, 2),
         "bh_return": round(bh_ret, 2),
         "max_drawdown": round(max_dd, 2),
+        "sharpe": round(sharpe, 2),
+        "profit_factor": round(profit_factor, 2),
+        "kelly_pct": round(kelly_pct, 1),
         "trades": trades,
         "win_rate": round(win_rate, 1),
     }
@@ -1446,7 +1561,8 @@ def compute_consecutive_streak(series: pd.Series) -> tuple[str, int]:
 def make_portfolio_df(
     portfolio: dict[str, dict[str, Any]],
     quotes: dict[str, dict[str, Any]],
-    fee_discount: float = 0.60,
+    fee_discount: float = 0.28,
+    odd_lot_min_1: bool = True,
 ) -> pd.DataFrame:
     rows = []
     eff_fee_rate = BASE_FEE_RATE * fee_discount
@@ -1459,23 +1575,35 @@ def make_portfolio_df(
 
         avg = float(holding["avg_cost"])
         shares = int(holding["shares"])
+        trade_type = str(holding.get("trade_type", "現股"))
         stop_loss = float(holding.get("stop_loss", 0.0))
         take_profit = float(holding.get("take_profit", 0.0))
 
         cost = avg * shares
-        buy_fee = max(MIN_FEE_NTD, round(cost * eff_fee_rate)) if cost > 0 else 0
+        buy_fee = calc_trade_fee(cost, shares, fee_discount, odd_lot_min_1)
         market_value = (price or 0.0) * shares
-        sell_fee = max(MIN_FEE_NTD, round(market_value * eff_fee_rate)) if market_value > 0 else 0
+        sell_fee = calc_trade_fee(market_value, shares, fee_discount, odd_lot_min_1)
         tax_rate = ETF_TAX_RATE if is_etf_code(code) else STOCK_TAX_RATE
-        tax = round(market_value * tax_rate)
+        tax = math.floor(market_value * tax_rate)
+
+        # 融資自備款與維持率試算
+        if trade_type == "融資":
+            loan_amount = cost * MARGIN_LOAN_RATIO_TSE
+            self_capital = cost - loan_amount + buy_fee
+            maint_ratio = (market_value / loan_amount * 100) if (loan_amount > 0 and price is not None) else 0.0
+        else:
+            loan_amount = 0.0
+            self_capital = cost + buy_fee
+            maint_ratio = 0.0
 
         pnl = (market_value - cost - buy_fee - sell_fee - tax) if price is not None else None
         daily_delta = (price - previous) if (price is not None and previous is not None) else None
         daily_pct = (daily_delta / previous * 100) if (daily_delta is not None and previous) else None
-        personal_pct = (pnl / (cost + buy_fee) * 100) if (pnl is not None and (cost + buy_fee) > 0) else None
+        personal_pct = (pnl / self_capital * 100) if (pnl is not None and self_capital > 0) else None
         daily_pnl = (daily_delta * shares) if daily_delta is not None else 0.0
 
-        breakeven = (cost + buy_fee + MIN_FEE_NTD) / (shares * (1.0 - eff_fee_rate - tax_rate)) if shares > 0 else avg
+        min_sell_f = ODD_LOT_MIN_FEE_NTD if (odd_lot_min_1 and shares < 1000) else MIN_FEE_NTD
+        breakeven = (cost + buy_fee + min_sell_f) / (shares * (1.0 - eff_fee_rate - tax_rate)) if shares > 0 else avg
 
         is_limit_up = bool(
             price is not None and (
@@ -1492,7 +1620,9 @@ def make_portfolio_df(
 
         alert_tag = ""
         if price is not None:
-            if stop_loss > 0 and price <= stop_loss:
+            if trade_type == "融資" and 0 < maint_ratio < MARGIN_MAINTENANCE_CALL:
+                alert_tag = f"追繳 {maint_ratio:.0f}%"
+            elif stop_loss > 0 and price <= stop_loss:
                 alert_tag = "觸及停損"
             elif take_profit > 0 and price >= take_profit:
                 alert_tag = "達標停利"
@@ -1501,6 +1631,7 @@ def make_portfolio_df(
         rows.append({
             "股票代號": code,
             "股票名稱": stock_name,
+            "交易別": trade_type,
             "最新成交價": price,
             "漲跌價差": daily_delta,
             "當日漲跌幅（%）": daily_pct,
@@ -1512,6 +1643,9 @@ def make_portfolio_df(
             "個人報酬率（%）": personal_pct,
             "市值": market_value if price is not None else 0.0,
             "投入成本": cost,
+            "自備款": self_capital,
+            "融資金額": loan_amount,
+            "維持率": round(maint_ratio, 1),
             "買進手續費": buy_fee,
             "預估賣出手續費": sell_fee,
             "證交稅": tax,
@@ -1524,7 +1658,7 @@ def make_portfolio_df(
 
 
 # ==============================================================================
-# 8. 專業個股「籌碼K線 + 量化健診 + 五檔大單 + 策略回測」深度分析組件
+# 8. 專業個股「籌碼K線 + 形態學 + 分價量表 + 進階回測」深度分析組件
 # ==============================================================================
 def render_stock_deep_dive(
     code: str,
@@ -1540,7 +1674,6 @@ def render_stock_deep_dive(
     low_p = parse_num(quote.get("l"))
     vol_shares = parse_num(quote.get("v"))
 
-    # 頂部即時報價橫幅
     if price is not None:
         delta = price - prev if prev is not None else 0.0
         pct = (delta / prev * 100) if prev else 0.0
@@ -1560,7 +1693,6 @@ def render_stock_deep_dive(
             unsafe_allow_html=True,
         )
 
-    # 技術指標控制列
     ind_c1, ind_c2, ind_c3 = st.columns([1.15, 1.35, 1.2])
     show_bb = ind_c1.toggle("疊加布林通道", value=False, key=f"bb_{key_prefix}_{code}")
     sub_ind = ind_c2.selectbox(
@@ -1597,8 +1729,9 @@ def render_stock_deep_dive(
         whale_lots=int(st.session_state["whale_min_lots"]),
     )
 
-    # 五維度多因子量化綜合評分看板
     q_score = compute_stock_quant_score(hist_df, chip_df, ob)
+    patterns = detect_candlestick_patterns(hist_df) if chart_mode != "當日盤中走勢" else []
+
     if not hist_df.empty:
         atr_val = float(hist_df.iloc[-1]["ATR14"]) if "ATR14" in hist_df.columns else 0.0
         atr_stop = (price - 2.0 * atr_val) if (price and atr_val > 0) else 0.0
@@ -1607,6 +1740,7 @@ def render_stock_deep_dive(
             val_badge = f" · 本益比 <b>{val_info.get('本益比', '—')}</b> · 殖利率 <b>{val_info.get('殖利率', '—')}</b> · PBR <b>{val_info.get('股價淨值比', '—')}</b>"
         atr_badge = f" · ATR移動停損參考 <b>{atr_stop:,.2f}</b>" if atr_stop > 0 else ""
         reasons_html = "".join(f"<span class='signal-pill sig-info'>{rs}</span>" for rs in q_score["reasons"])
+        patterns_html = "".join(f"<span class='signal-pill sig-pat'>{pt}</span>" for pt in patterns)
         st.markdown(f"""
         <div class="score-banner">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
@@ -1617,7 +1751,7 @@ def render_stock_deep_dive(
                 </div>
                 <div class="subtle">趨勢 {q_score['trend']}/25 · 動能 {q_score['momentum']}/25 · 法人 {q_score['chip']}/25 · 資券 {q_score['margin']}/15 · 大單 {q_score['orderbook']}/10{val_badge}{atr_badge}</div>
             </div>
-            <div style="margin-top:6px;">{reasons_html}</div>
+            <div style="margin-top:6px;">{patterns_html}{reasons_html}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1879,21 +2013,62 @@ def render_stock_deep_dive(
     else:
         st.caption(f"目前為非盤中時段或海外伺服器連線，{label} 暫無即時五檔掛單明細。")
 
-    # 歷史策略回測與歷年除息紀錄收合工具箱
+    # 分價量表（籌碼支撐壓力分布圖）
     if chart_mode != "當日盤中走勢" and not hist_df.empty:
-        with st.expander("🧪 歷史波段策略回測模擬器（含手續費與證交稅）"):
-            strat_choice = st.selectbox(
+        with st.expander("📊 分價量表（近波段籌碼密集區 / 支撐壓力判斷）"):
+            vp_df, poc_price = compute_volume_profile(hist_df, bins=12)
+            if not vp_df.empty:
+                pos_txt = "現價位於最大籌碼密集區之上（下方具強支撐）" if (price and price >= poc_price) else "現價位於最大籌碼密集區之下（上方存套牢壓力）"
+                st.markdown(f"最大成交量價位 (POC)：**{poc_price:,.2f} 元** ｜ {pos_txt}")
+                bar_c = ["#f5c26b" if abs(m - poc_price) < 0.01 else "#38bdf8" for m in vp_df["中位價"]]
+                fig_vp = go.Figure(
+                    data=[go.Bar(x=vp_df["累積張數"], y=vp_df["價格區間"], orientation="h", marker_color=bar_c)]
+                )
+                fig_vp.update_layout(
+                    height=260,
+                    margin=dict(l=8, r=8, t=10, b=8),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(20,22,28,0.65)",
+                    font=dict(color="#f3f5fa", size=11),
+                )
+                st.plotly_chart(fig_vp, use_container_width=True, key=f"vp_chart_{key_prefix}_{code}_{k_bars}")
+
+    # 進階歷史波段策略回測模擬器
+    if chart_mode != "當日盤中走勢" and not hist_df.empty:
+        with st.expander("🧪 進階波段策略回測模擬器（含停損風控、夏普值與凱利倉位）"):
+            bt_c1, bt_c2 = st.columns([2, 1])
+            strat_choice = bt_c1.selectbox(
                 "選擇回測交易策略",
-                ["MA5 / MA20 均線黃金交叉", "KD 低檔金叉波段 (K>D)", "MACD 紅柱動能波段 (DIF>DEA)", "布林中軌趨勢追蹤"],
+                [
+                    "MA5 / MA20 均線黃金交叉",
+                    "KD 低檔金叉波段 (K>D)",
+                    "MACD 紅柱動能波段 (DIF>DEA)",
+                    "RSI 強勢動能順勢 (RSI14>55)",
+                    "布林中軌趨勢追蹤",
+                ],
                 key=f"bt_strat_{key_prefix}_{code}",
             )
-            bt_res = run_strategy_backtest(hist_df, strat_choice)
+            bt_sl = bt_c2.number_input(
+                "硬性停損 (%，0=不設)",
+                min_value=0.0,
+                max_value=25.0,
+                value=7.0,
+                step=1.0,
+                key=f"bt_sl_{key_prefix}_{code}",
+            )
+            bt_res = run_strategy_backtest(
+                hist_df,
+                strat_choice,
+                stop_loss_pct=float(bt_sl),
+                fee_discount=float(st.session_state["fee_discount"]),
+            )
             if bt_res:
                 b1, b2, b3, b4 = st.columns(4)
                 b1.metric("策略報酬率", f"{bt_res['total_return']:+.2f}%", delta=f"勝率 {bt_res['win_rate']}%")
                 b2.metric("買進持有報酬", f"{bt_res['bh_return']:+.2f}%")
                 b3.metric("最大回撤 MDD", f"{bt_res['max_drawdown']:.2f}%")
-                b4.metric("完成交易次數", f"{bt_res['trades']} 筆")
+                b4.metric("夏普 / 盈虧比", f"{bt_res['sharpe']} / {bt_res['profit_factor']}")
+                st.caption(f"完成交易：{bt_res['trades']} 筆 ｜ 凱利公式建議單筆最佳倉位比例：**{bt_res['kelly_pct']}%**")
 
                 bt_df = bt_res["df"]
                 fig_bt = go.Figure()
@@ -1907,7 +2082,7 @@ def render_stock_deep_dive(
                     font=dict(color="#f3f5fa", size=11),
                     legend=dict(orientation="h", y=1.15),
                 )
-                st.plotly_chart(fig_bt, use_container_width=True, key=f"bt_chart_{key_prefix}_{code}_{strat_choice}")
+                st.plotly_chart(fig_bt, use_container_width=True, key=f"bt_chart_{key_prefix}_{code}_{strat_choice}_{bt_sl}")
 
     with st.expander("💰 歷年現金股利與除息殖利率紀錄"):
         div_df = fetch_dividend_history(code)
@@ -1966,7 +2141,7 @@ if top_cols[6].button(
     st.session_state["show_ai_panel"] = False
     st.rerun()
 
-# 全域系統設定抽屜（點擊右上 ⚙️ 展開）
+# 全域系統設定抽屜
 if st.session_state["show_settings"]:
     with st.container(border=True):
         st.markdown(f"**⚙️ 旗艦終端機系統參數設定（{APP_VERSION}）**")
@@ -1984,16 +2159,31 @@ if st.session_state["show_settings"]:
             format="%.2f",
             key="cfg_fee_disc",
         )
-        st.session_state["cash_balance"] = s4.number_input(
+        st.session_state["odd_lot_min_fee"] = s4.toggle(
+            "零股手續費最低 1 元優惠",
+            value=bool(st.session_state["odd_lot_min_fee"]),
+            key="cfg_odd_min1",
+        )
+
+        s5, s6 = st.columns(2)
+        st.session_state["cash_balance"] = s5.number_input(
             "交割戶可用現金（NT$）",
             min_value=0,
             value=int(st.session_state["cash_balance"]),
             step=10000,
             key="cfg_cash",
         )
+        st.session_state["margin_interest_rate"] = s6.number_input(
+            "融資年利率（%）",
+            min_value=1.0,
+            max_value=12.0,
+            value=float(st.session_state["margin_interest_rate"]),
+            step=0.1,
+            key="cfg_margin_rate",
+        )
 
-        s5, s6 = st.columns(2)
-        st.session_state["whale_min_wan"] = s5.number_input(
+        s7, s8 = st.columns(2)
+        st.session_state["whale_min_wan"] = s7.number_input(
             "大戶大單金額門檻（萬元）",
             min_value=50,
             max_value=3000,
@@ -2001,7 +2191,7 @@ if st.session_state["show_settings"]:
             step=50,
             key="cfg_whale_wan",
         )
-        st.session_state["whale_min_lots"] = s6.number_input(
+        st.session_state["whale_min_lots"] = s8.number_input(
             "大戶大單張數門檻（張）",
             min_value=5,
             max_value=500,
@@ -2056,7 +2246,6 @@ def render_main_terminal() -> None:
     now_str = now_dt.strftime("%Y/%m/%d %H:%M:%S")
     time_short = now_dt.strftime("%H:%M:%S")
 
-    # 自動補齊股票名稱與盤中軌跡
     updated_name = False
     for code, holding in current.items():
         q = quotes.get(code, {})
@@ -2076,9 +2265,14 @@ def render_main_terminal() -> None:
     if updated_name:
         save_portfolio(current, sync_url=False)
 
-    df = make_portfolio_df(current, quotes, fee_discount=float(st.session_state["fee_discount"]))
+    df = make_portfolio_df(
+        current,
+        quotes,
+        fee_discount=float(st.session_state["fee_discount"]),
+        odd_lot_min_1=bool(st.session_state["odd_lot_min_fee"]),
+    )
 
-    # 🤖 AI 量化投資組合健診報告（點擊右上 🤖AI 展開）
+    # 🤖 AI 量化投資組合健診報告
     if st.session_state["show_ai_panel"]:
         st.markdown('<div class="ai-card">', unsafe_allow_html=True)
         st.markdown("**🤖 AI 持股與籌碼量化健診報告**")
@@ -2098,6 +2292,13 @@ def render_main_terminal() -> None:
                 st.markdown(f"• **資金分散評估**：最大部位 **{top_stock['股票代號']} {top_stock['股票名稱']}** 佔比 **{top_weight:.1f}%**，風險分散度穩健。")
             st.markdown(f"• **強弱勢對比**：報酬領先為 **{best_row['股票名稱']}（{best_row['個人報酬率（%）']:+.2f}%）**；落後為 **{worst_row['股票名稱']}（{worst_row['個人報酬率（%）']:+.2f}%）**。")
 
+            margin_df = df[df["交易別"] == "融資"]
+            if not margin_df.empty:
+                tot_m_val = float(margin_df["市值"].sum())
+                tot_m_loan = float(margin_df["融資金額"].sum())
+                overall_maint = (tot_m_val / tot_m_loan * 100) if tot_m_loan > 0 else 0.0
+                st.markdown(f"• **信用融資維持率**：整戶融資維持率目前為 **{overall_maint:.1f}%**（追繳警戒線為 130%）。")
+
             alerts_active = df[df["警示"] != ""]
             if not alerts_active.empty:
                 for _, ar in alerts_active.iterrows():
@@ -2110,23 +2311,24 @@ def render_main_terminal() -> None:
     # 分支 A：頂部主導覽 -> 「資產」總覽、已實現帳本與情境模擬
     # ==========================================================================
     if top_sec == "資產":
-        st.markdown("<div class='section-title'>💼 總資產淨值配置與壓力測試</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>💼 總資產淨值配置、信用維持率與壓力測試</div>", unsafe_allow_html=True)
         stock_val = float(df["市值"].sum()) if not df.empty else 0.0
+        total_loan = float(df["融資金額"].sum()) if not df.empty else 0.0
         cash_val = float(st.session_state["cash_balance"])
-        net_worth = stock_val + cash_val
+        net_worth = stock_val - total_loan + cash_val
         tot_pnl = float(df["未實現損益（元）"].fillna(0).sum()) if not df.empty else 0.0
         realized_sum = sum(float(t.get("net_pnl", 0)) for t in st.session_state["realized_trades"])
-        stock_ratio = (stock_val / net_worth * 100) if net_worth > 0 else 0.0
+        stock_ratio = ((stock_val - total_loan) / net_worth * 100) if net_worth > 0 else 0.0
 
         st.markdown(f"""
         <div class="metric-cards-grid">
             <div class="metric-card">
-                <div class="label">總淨資產 (NT$)</div>
+                <div class="label">淨資產總額 (NT$)</div>
                 <div class="val">{net_worth:,.0f}</div>
-                <div class="sub">持股水位 {stock_ratio:.1f}%</div>
+                <div class="sub">淨持股水位 {stock_ratio:.1f}%</div>
             </div>
             <div class="metric-card">
-                <div class="label">股票現值 / 未實現</div>
+                <div class="label">股票市值 / 未實現</div>
                 <div class="val">{stock_val:,.0f}</div>
                 <div class="sub {'pos' if tot_pnl >= 0 else 'neg'}">{tot_pnl:+,.0f}</div>
             </div>
@@ -2137,6 +2339,16 @@ def render_main_terminal() -> None:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        if total_loan > 0:
+            margin_mv = float(df[df["交易別"] == "融資"]["市值"].sum())
+            maint = (margin_mv / total_loan * 100)
+            m_cls = "neg" if maint < MARGIN_MAINTENANCE_WARN else "pos"
+            st.markdown(
+                f"<div class='ratio-card'>💳 <b>信用融資帳戶監控</b>：融資總借款 <b>NT$ {total_loan:,.0f}</b> ｜ "
+                f"整戶維持率 <span class='{m_cls}'><b>{maint:.1f}%</b></span>（低於 130% 將面臨追繳斷頭風險）</div>",
+                unsafe_allow_html=True,
+            )
 
         labels = ["交割現金"] + ([f"{r['股票代號']} {r['股票名稱']}" for _, r in df.iterrows()] if not df.empty else [])
         values = [cash_val] + ([float(r["市值"]) for _, r in df.iterrows()] if not df.empty else [])
@@ -2150,7 +2362,6 @@ def render_main_terminal() -> None:
         )
         st.plotly_chart(fig_asset, use_container_width=True, key="asset_pie_chart")
 
-        # 投資組合大盤漲跌情境壓力測試
         st.markdown("<div class='section-title'>📐 投資組合系統性漲跌情境模擬</div>", unsafe_allow_html=True)
         sim_pct = st.slider("模擬大盤／持股同步漲跌幅（%）", -10.0, 10.0, 0.0, step=0.5, key="asset_sim_slider")
         sim_stock_val = stock_val * (1.0 + sim_pct / 100.0)
@@ -2158,45 +2369,62 @@ def render_main_terminal() -> None:
         sim_cls = "pos" if sim_diff >= 0 else "neg"
         st.markdown(
             f"<div class='ratio-card'>若整體持股同步變動 <b>{sim_pct:+.1f}%</b>，股票市值將變為 <b>NT$ {sim_stock_val:,.0f}</b>，"
-            f"帳面損益變動 <span class='{sim_cls}'><b>{sim_diff:+,.0f} 元</b></span>，總淨資產預估為 <b>NT$ {sim_stock_val + cash_val:,.0f}</b>。</div>",
+            f"帳面損益變動 <span class='{sim_cls}'><b>{sim_diff:+,.0f} 元</b></span>，總淨資產預估為 <b>NT$ {sim_stock_val - total_loan + cash_val:,.0f}</b>。</div>",
             unsafe_allow_html=True,
         )
 
-        # 已實現損益交易帳本
-        st.markdown("<div class='section-title'>📒 已實現損益結算帳本</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>📒 已實現損益與現金股利結算帳本</div>", unsafe_allow_html=True)
         with st.form("realized_trade_form", clear_on_submit=True):
-            rt1, rt2, rt3, rt4 = st.columns([1.1, 1.1, 1.1, 1.1])
-            r_code = rt1.text_input("代號", placeholder="如 2330")
-            r_buy = rt2.number_input("買進均價", min_value=0.01, value=100.0, step=1.0)
-            r_sell = rt3.number_input("賣出成交價", min_value=0.01, value=110.0, step=1.0)
-            r_sh = rt4.number_input("賣出股數", min_value=1, value=1000, step=100)
-            if st.form_submit_button("＋ 登錄已實現損益", use_container_width=True):
+            rt1, rt2, rt3, rt4, rt5 = st.columns([1.0, 1.0, 1.0, 1.0, 1.0])
+            r_type = rt1.selectbox("類型", ["賣出結算", "現金股利"])
+            r_code = rt2.text_input("代號", placeholder="如 2330")
+            r_buy = rt3.number_input("買價(配息填0)", min_value=0.0, value=100.0, step=1.0)
+            r_sell = rt4.number_input("賣價/每股股利", min_value=0.01, value=110.0, step=0.5)
+            r_sh = rt5.number_input("股數", min_value=1, value=1000, step=100)
+            if st.form_submit_button("＋ 登錄帳本並同步更新交割現金", use_container_width=True):
                 rc = r_code.strip().upper()
                 if rc:
-                    disc = float(st.session_state["fee_discount"])
-                    b_cost = r_buy * r_sh
-                    s_val = r_sell * r_sh
-                    b_fee = max(MIN_FEE_NTD, round(b_cost * BASE_FEE_RATE * disc))
-                    s_fee = max(MIN_FEE_NTD, round(s_val * BASE_FEE_RATE * disc))
-                    tax_r = ETF_TAX_RATE if is_etf_code(rc) else STOCK_TAX_RATE
-                    tax_v = round(s_val * tax_r)
-                    net_p = s_val - b_cost - b_fee - s_fee - tax_v
-                    st.session_state["realized_trades"].insert(0, {
-                        "日期": now_dt.strftime("%Y/%m/%d"),
-                        "代號": rc,
-                        "買價": r_buy,
-                        "賣價": r_sell,
-                        "股數": r_sh,
-                        "淨損益": round(net_p),
-                        "net_pnl": net_p,
-                    })
+                    if r_type == "現金股利":
+                        div_total = math.floor(r_sell * r_sh)
+                        st.session_state["cash_balance"] = int(st.session_state["cash_balance"]) + div_total
+                        st.session_state["realized_trades"].insert(0, {
+                            "日期": now_dt.strftime("%Y/%m/%d"),
+                            "類型": "股利入帳",
+                            "代號": rc,
+                            "買價": 0.0,
+                            "賣價": r_sell,
+                            "股數": r_sh,
+                            "淨損益": div_total,
+                            "net_pnl": float(div_total),
+                        })
+                    else:
+                        disc = float(st.session_state["fee_discount"])
+                        odd_1 = bool(st.session_state["odd_lot_min_fee"])
+                        b_cost = r_buy * r_sh
+                        s_val = r_sell * r_sh
+                        b_fee = calc_trade_fee(b_cost, r_sh, disc, odd_1)
+                        s_fee = calc_trade_fee(s_val, r_sh, disc, odd_1)
+                        tax_r = ETF_TAX_RATE if is_etf_code(rc) else STOCK_TAX_RATE
+                        tax_v = math.floor(s_val * tax_r)
+                        net_p = s_val - b_cost - b_fee - s_fee - tax_v
+                        st.session_state["cash_balance"] = int(st.session_state["cash_balance"]) + round(s_val - s_fee - tax_v)
+                        st.session_state["realized_trades"].insert(0, {
+                            "日期": now_dt.strftime("%Y/%m/%d"),
+                            "類型": "賣出實現",
+                            "代號": rc,
+                            "買價": r_buy,
+                            "賣價": r_sell,
+                            "股數": r_sh,
+                            "淨損益": round(net_p),
+                            "net_pnl": net_p,
+                        })
                     st.rerun()
 
         if st.session_state["realized_trades"]:
-            df_rt = pd.DataFrame(st.session_state["realized_trades"])[["日期", "代號", "買價", "賣價", "股數", "淨損益"]]
+            df_rt = pd.DataFrame(st.session_state["realized_trades"])[["日期", "類型", "代號", "買價", "賣價", "股數", "淨損益"]]
             st.dataframe(df_rt, use_container_width=True, hide_index=True)
         else:
-            st.caption("尚未登錄任何已實現交易紀錄。")
+            st.caption("尚未登錄任何已實現交易或除息入帳紀錄。")
         return
 
     # ==========================================================================
@@ -2235,11 +2463,11 @@ def render_main_terminal() -> None:
         return
 
     # ==========================================================================
-    # 分支 C：頂部主導覽 -> 「討論」筆記、攤平計算機與部位風控試算
+    # 分支 C：頂部主導覽 -> 「討論」筆記、攤平計算機、存股複利與部位風控試算
     # ==========================================================================
     if top_sec == "討論":
-        st.markdown("<div class='section-title'>💬 交易策略備忘錄與實戰計算工具</div>", unsafe_allow_html=True)
-        note_val = st.text_area("我的看盤交易筆記", value=st.session_state["user_notes"], height=115, key="notes_textarea")
+        st.markdown("<div class='section-title'>💬 交易策略備忘錄與量化計算工具箱</div>", unsafe_allow_html=True)
+        note_val = st.text_area("我的看盤交易筆記", value=st.session_state["user_notes"], height=110, key="notes_textarea")
         if st.button("儲存筆記", type="primary", key="save_notes_action"):
             st.session_state["user_notes"] = note_val
             st.success("筆記已儲存！")
@@ -2279,9 +2507,23 @@ def render_main_terminal() -> None:
             else:
                 st.warning("停損價必須低於預計進場價。")
 
+        st.markdown("<div class='section-title'>🌱 ETF / 存股定期定額複利試算機</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            d1, d2, d3 = st.columns(3)
+            dca_monthly = d1.number_input("每月定期定額（NT$）", min_value=1000, value=15000, step=1000, key="dca_m")
+            dca_years = d2.number_input("持續投資年數", min_value=1, max_value=40, value=10, step=1, key="dca_y")
+            dca_rate = d3.number_input("預估年化報酬（%）", min_value=1.0, max_value=20.0, value=8.0, step=0.5, key="dca_r")
+            months = int(dca_years * 12)
+            r_m = (dca_rate / 100.0) / 12.0
+            fv = dca_monthly * (((1 + r_m) ** months - 1) / r_m) if r_m > 0 else dca_monthly * months
+            principal_tot = dca_monthly * months
+            st.markdown(
+                f"累積投入本金：**NT$ {principal_tot:,.0f}** ｜ 期滿預估總資產：**NT$ {fv:,.0f}**（複利增值 **+{fv - principal_tot:,.0f} 元**）"
+            )
+
         st.markdown("<div class='section-title'>🔥 熱門話題標的（點擊一鍵看籌碼K線）</div>", unsafe_allow_html=True)
         hot_cols = st.columns(4)
-        for idx, (h_code, h_name) in enumerate([("2330", "台積電"), ("8996", "高力"), ("00981A", "主動統一"), ("2603", "長榮")]):
+        for idx, (h_code, h_name) in enumerate([("2330", "台積電"), ("8996", "高力"), ("00981A", "主動統一"), ("1815", "富喬")]):
             if hot_cols[idx].button(f"{h_code} {h_name}", key=f"hot_jump_{h_code}", use_container_width=True):
                 st.session_state["quick_lookup_code"] = h_code
                 st.session_state["top_section"] = "台股"
@@ -2355,7 +2597,7 @@ def render_main_terminal() -> None:
         st.markdown(html_sec, unsafe_allow_html=True)
         return
 
-    # -------------------- 底部 3：焦點股（含多因子量化選股掃描器） --------------------
+    # -------------------- 底部 3：焦點股（含智慧多條件選股掃描器） --------------------
     if btab == "焦點股":
         st.markdown("<div class='section-title'>⭐ 台股熱門族群與焦點股</div>", unsafe_allow_html=True)
         cat_name = st.radio(
@@ -2386,24 +2628,26 @@ def render_main_terminal() -> None:
                 st.session_state["bottom_tab"] = "自選股"
                 st.rerun()
 
-        # 技術面多頭訊號即時掃描器
-        st.markdown("<div class='section-title'>🔎 族群技術面多頭型態掃描</div>", unsafe_allow_html=True)
-        if st.button("掃描本族群「均線多頭排列 / KD低檔金叉」標的", use_container_width=True, key="scan_focus_btn"):
+        st.markdown("<div class='section-title'>🔎 全市場重點股「多條件量化選股掃描器」</div>", unsafe_allow_html=True)
+        sc1, sc2 = st.columns(2)
+        cond_ma = sc1.checkbox("站上月線 (收盤 > MA20)", value=True, key="scan_cond_ma")
+        cond_kd = sc2.checkbox("KD 黃金交叉 (K > D)", value=True, key="scan_cond_kd")
+        if st.button("執行全族群多條件掃描", use_container_width=True, type="primary", key="scan_focus_btn"):
+            all_candidates = list(dict.fromkeys(item for sub in FOCUS_CATEGORIES.values() for item in sub))
             found_any = False
-            for f_code, f_name in FOCUS_CATEGORIES[cat_name]:
+            for f_code, f_name in all_candidates:
                 hdf = fetch_chart_history(f_code, "近 30 日 K 線圖", bars=30)
                 if not hdf.empty and {"收盤", "MA5", "MA10", "MA20", "K", "D"}.issubset(hdf.columns):
                     lr = hdf.iloc[-1]
-                    sigs = []
-                    if lr["收盤"] > lr["MA5"] > lr["MA10"] > lr["MA20"]:
-                        sigs.append("均線多頭排列")
-                    if lr["K"] > lr["D"] and lr["K"] < 65:
-                        sigs.append(f"KD金叉 (K={lr['K']:.1f})")
-                    if sigs:
+                    ok_ma = (lr["收盤"] > lr["MA20"]) if cond_ma else True
+                    ok_kd = (lr["K"] > lr["D"]) if cond_kd else True
+                    if ok_ma and ok_kd:
                         found_any = True
-                        st.success(f"✅ **{f_code} {f_name}**（收盤 {lr['收盤']:,.2f}）：{'、'.join(sigs)}")
+                        pats = detect_candlestick_patterns(hdf)
+                        pat_str = f" ｜ 形態：{'、'.join(pats)}" if pats else ""
+                        st.success(f"✅ **{f_code} {f_name}**（收盤 {lr['收盤']:,.2f} · K={lr['K']:.1f}）{pat_str}")
             if not found_any:
-                st.info("目前該族群暫無同時符合強勢多頭排列之個股。")
+                st.info("目前無同時符合上述篩選條件之標的，可放寬條件再試。")
         return
 
     # -------------------- 底部 5：動向 --------------------
@@ -2480,14 +2724,14 @@ def render_main_terminal() -> None:
 
         with st.expander("📖 籌碼與技術指標實戰百科（點擊展開）", expanded=True):
             st.markdown("""
-            - **主力籌碼集中度**：近 5 日三大法人買賣超張數 ÷ 近 5 日總成交張數。通常 **> +10%** 代表籌碼明顯往法人大戶手中集中。
-            - **土洋對作 vs 土洋合買**：外資（洋）與投信（土）同步買超稱為「土洋合買」，波段續航力最強；若投信連買而外資小賣，常為內資主導的中小型股行情。
-            - **資減券增（軋空結構）**：股價上漲過程中散戶融資減少、融券增加，代表籌碼安定且具潛在軋空力道。
-            - **ATR 移動停損法**：利用 14 日平均真實波幅（ATR14）設定 `現價 - 2 × ATR14` 為移動停損點，可避免在正常洗盤中被輕易震出場。
+- **主力籌碼集中度**：近 5 日三大法人買賣超張數 ÷ 近 5 日總成交張數。通常 **> +10%** 代表籌碼明顯往法人大戶手中集中。
+- **分價量表 (POC 籌碼鐵板區)**：過去一段時間內成交量最大的價格區間。股價站上 POC 代表多數人獲利，回檔時容易形成強勁支撐。
+- **融資維持率與追繳線**：台灣信用交易整戶維持率低於 **130%** 會發出追繳令（Margin Call），當個股融資大減且股價止跌時，常代表浮額清洗完畢。
+- **凱利公式 (Kelly Criterion)**：根據策略歷史勝率與盈虧比計算出的最佳單筆資金投入上限，實戰中常採「半凱利（Half-Kelly）」以降低淨值波動。
             """)
         return
 
-    # -------------------- 底部 2：自選股（含任意代號籌碼 K 線深度分析） --------------------
+    # -------------------- 底部 2：自選股 --------------------
     if btab == "自選股":
         st.markdown("<div class='section-title'>📈 自選股與籌碼 K 線深度終端</div>", unsafe_allow_html=True)
         q1, q2, q3 = st.columns([1.8, 1.0, 1.0])
@@ -2581,19 +2825,20 @@ def render_main_terminal() -> None:
         unsafe_allow_html=True,
     )
 
-    # ✏️ 互動式庫存新增／修改／停損停利編輯面板
+    # ✏️ 互動式庫存新增／修改／融資標記／停損停利編輯面板
     if st.session_state["show_editor"]:
         with st.container(border=True):
-            st.markdown("**✏️ 編輯我的庫存持股（自動記憶於此裝置）**")
+            st.markdown("**✏️ 編輯我的庫存持股（支援現股 / 融資與停損停利設定）**")
             with st.form("mobile_add_holding", clear_on_submit=True):
-                ec1, ec2, ec3 = st.columns([1.2, 1.2, 1.2])
+                ec1, ec2, ec3, ec4 = st.columns([1.1, 1.1, 1.1, 0.9])
                 e_code = ec1.text_input("股票代號", placeholder="如 2330", max_chars=8)
                 e_cost = ec2.number_input("買進均價", min_value=0.01, value=100.0, step=0.5, format="%.2f")
                 e_shares = ec3.number_input("持有股數", min_value=1, value=1000, step=100)
+                e_type = ec4.selectbox("交易別", ["現股", "融資"])
 
-                ec4, ec5 = st.columns(2)
-                e_sl = ec4.number_input("停損提醒價（0 為不設）", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-                e_tp = ec5.number_input("停利提醒價（0 為不設）", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+                ec5, ec6 = st.columns(2)
+                e_sl = ec5.number_input("停損提醒價（0 為不設）", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+                e_tp = ec6.number_input("停利提醒價（0 為不設）", min_value=0.0, value=0.0, step=1.0, format="%.2f")
 
                 if st.form_submit_button("＋ 新增／累加這筆持股", use_container_width=True, type="primary"):
                     c_clean = e_code.strip().upper()
@@ -2607,6 +2852,7 @@ def render_main_terminal() -> None:
                                 "avg_cost": (float(old["avg_cost"]) * int(old["shares"]) + e_cost * int(e_shares)) / tot_s,
                                 "shares": tot_s,
                                 "name": auto_n if auto_n != c_clean else old.get("name", c_clean),
+                                "trade_type": e_type,
                                 "stop_loss": e_sl if e_sl > 0 else float(old.get("stop_loss", 0.0)),
                                 "take_profit": e_tp if e_tp > 0 else float(old.get("take_profit", 0.0)),
                                 "note": old.get("note", ""),
@@ -2616,6 +2862,7 @@ def render_main_terminal() -> None:
                                 "avg_cost": float(e_cost),
                                 "shares": int(e_shares),
                                 "name": auto_n,
+                                "trade_type": e_type,
                                 "stop_loss": float(e_sl),
                                 "take_profit": float(e_tp),
                                 "note": "",
@@ -2626,8 +2873,9 @@ def render_main_terminal() -> None:
             if current:
                 for c_item, info in list(current.items()):
                     rc1, rc2 = st.columns([3.6, 1])
+                    tt = info.get("trade_type", "現股")
                     rc1.markdown(
-                        f"**{c_item} {info.get('name', '')}** · {int(info['shares']):,}股 @ {float(info['avg_cost']):,.2f}"
+                        f"**{c_item} {info.get('name', '')}** · `[{tt}]` {int(info['shares']):,}股 @ {float(info['avg_cost']):,.2f}"
                     )
                     if rc2.button("刪除", key=f"mob_del_{c_item}", use_container_width=True):
                         current.pop(c_item, None)
@@ -2645,7 +2893,7 @@ def render_main_terminal() -> None:
                 st.session_state["show_editor"] = False
                 st.rerun()
 
-    # 子導覽列（即時損益 | 事件/新聞 | 持股分析 | 看盤/盤後）
+    # 子導覽列
     sub_cols = st.columns(4)
     for idx, st_name in enumerate(["即時損益", "事件/新聞", "持股分析", "看盤/盤後"]):
         if sub_cols[idx].button(
@@ -2671,8 +2919,9 @@ def render_main_terminal() -> None:
 
             total_value = float(df["市值"].sum())
             total_cost = float(df["投入成本"].sum())
+            total_self_cap = float(df["自備款"].sum())
             total_pnl = float(df["未實現損益（元）"].fillna(0).sum())
-            total_return = total_pnl / (total_cost + float(df["買進手續費"].sum())) * 100 if total_cost else 0.0
+            total_return = total_pnl / total_self_cap * 100 if total_self_cap else 0.0
             total_daily_delta = float(df["今日損益"].sum())
             prev_total_val = total_value - total_daily_delta
             daily_return_pct = (total_daily_delta / prev_total_val * 100) if prev_total_val > 0 else 0.0
@@ -2695,7 +2944,7 @@ def render_main_terminal() -> None:
                 <div class="metric-card">
                     <div class="label">股票市值</div>
                     <div class="val">{total_value:,.0f}</div>
-                    <div class="sub">成本 {total_cost:,.0f}</div>
+                    <div class="sub">自備 {total_self_cap:,.0f}</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -2713,6 +2962,7 @@ def render_main_terminal() -> None:
             for _, row in df.iterrows():
                 code = row["股票代號"]
                 name = row["股票名稱"]
+                tt = row["交易別"]
                 price = row["最新成交價"]
                 delta = row["漲跌價差"]
                 pct = row["當日漲跌幅（%）"]
@@ -2738,13 +2988,14 @@ def render_main_terminal() -> None:
                 else:
                     price_html = f'<div class="val {cls_delta}">{price_str}</div>'
 
+                tt_badge = f'<span class="badge-margin">資 {row["維持率"]:.0f}%</span>' if tt == "融資" else '<span class="badge">現</span>'
                 alert_badge = f'<span class="badge-warn">{row["警示"]}</span>' if row["警示"] else ""
 
                 html_items += f"""
                 <div class="inventory-item">
                     <div class="name-col">
                         <span class="title">{name}</span>
-                        <span class="sub"><span class="badge">現</span> {code} · 兩平 {be_price:,.2f} {alert_badge}</span>
+                        <span class="sub">{tt_badge} {code} · 兩平 {be_price:,.2f} {alert_badge}</span>
                     </div>
                     <div class="data-col {cls_d}">
                         <div class="val">{daily_pnl_str}</div>
@@ -2791,7 +3042,7 @@ def render_main_terminal() -> None:
         else:
             st.info("暫無最新相關新聞推播。")
 
-    # ---------- 子分頁 3：持股分析（資金配置 + 損益分布 + 持股相關性熱力圖） ----------
+    # ---------- 子分頁 3：持股分析 ----------
     elif active_sub == "持股分析":
         if not df.empty:
             st.markdown("<div class='section-title'>📊 投資組合資金配置與損益分佈</div>", unsafe_allow_html=True)
@@ -2838,7 +3089,6 @@ def render_main_terminal() -> None:
                     )
                     st.plotly_chart(fig_bar, use_container_width=True, key="holding_bar_chart")
 
-            # 持股報酬率相關性矩陣（檢驗風險分散程度）
             if len(df) >= 2:
                 st.markdown("<div class='section-title'>🔗 持股日報酬相關係數矩陣（風險分散檢驗）</div>", unsafe_allow_html=True)
                 ret_dict: dict[str, pd.Series] = {}
@@ -2868,8 +3118,8 @@ def render_main_terminal() -> None:
                     )
                     st.plotly_chart(fig_corr, use_container_width=True, key="holding_corr_heatmap")
 
-            st.markdown("<div class='section-title'>🧾 損益兩平價、手續費與證交稅明細</div>", unsafe_allow_html=True)
-            cost_view = df[["股票代號", "股票名稱", "買進均價", "損益兩平價", "買進手續費", "預估賣出手續費", "證交稅"]].copy()
+            st.markdown("<div class='section-title'>🧾 損益兩平價、融資維持率與交易稅費明細</div>", unsafe_allow_html=True)
+            cost_view = df[["股票代號", "股票名稱", "交易別", "買進均價", "損益兩平價", "買進手續費", "預估賣出手續費", "證交稅"]].copy()
             st.dataframe(cost_view, use_container_width=True, hide_index=True)
         else:
             st.info("請先新增持股以檢視配置分析。")
@@ -2896,7 +3146,7 @@ def render_main_terminal() -> None:
 render_main_terminal()
 
 # ==============================================================================
-# 11. 底部 6 大原生導覽列（全部真實可點擊切換）
+# 11. 底部 6 大原生導覽列
 # ==============================================================================
 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 bottom_items = [
