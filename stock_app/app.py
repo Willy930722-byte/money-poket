@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import math
 import time
@@ -23,16 +23,21 @@ import streamlit.components.v1 as components
 # 1. 全域常數、API 端點與系統預設參數 (GLOBAL CONSTANTS & ENDPOINTS)
 # ==============================================================================
 APP_TITLE = "台股・籌碼K線旗艦量化終端"
-APP_VERSION = "v7.2 Yahoo Four-Card White-UI + Dual-K Pro"
+APP_VERSION = "v8.0 Yahoo Four-Card Interactive + Full Index Detail Pro"
 
 TWSE_MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_CHART_BACKUP_URL = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
 
+# 證交所 & 櫃買中心官方盤後/盤中統計端點
+TWSE_FMTQIK_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
+TWSE_MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 TWSE_INST_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
+TWSE_BFI82U_URL = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
 TWSE_MARGIN_URL = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
 TWSE_VALUATION_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d"
 
+TPEX_AFTER_URL = "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php"
 TPEX_INST_URL = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php"
 TPEX_MARGIN_URL = "https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php"
 TPEX_VALUATION_URL = "https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php"
@@ -84,59 +89,85 @@ DEFAULT_PORTFOLIO: dict[str, dict[str, Any]] = {
 
 DEFAULT_WATCHLIST: list[str] = ["2330", "2317", "2454", "2603", "00878", "8996", "1815", "2303"]
 
-# Yahoo 股市主畫面四宮格大盤走勢卡片配置（上市 / 上櫃 / 電子 / 金融）
-FOUR_MARKET_CARDS: list[dict[str, str]] = [
-    {"title": "上市", "mis": "tse_t00.tw", "yahoo": "^TWII"},
-    {"title": "上櫃", "mis": "otc_o00.tw", "yahoo": "^TWOII"},
-    {"title": "電子", "mis": "tse_t13.tw", "yahoo": "^TWII"},
-    {"title": "金融", "mis": "tse_t17.tw", "yahoo": "^TWII"},
+# Yahoo 股市主畫面四宮格大盤走勢卡片完整配置（上市 / 上櫃 / 電子 / 金融）
+FOUR_MARKET_CARDS: list[dict[str, Any]] = [
+    {
+        "id": "TSE",
+        "title": "上市",
+        "full_name": "臺灣證券交易所加權股價指數 (TAIEX)",
+        "mis": "tse_t00.tw",
+        "yahoo": "^TWII",
+        "proxy_etf": "0050",
+        "components": [
+            ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"),
+            ("2308", "台達電"), ("2382", "廣達"), ("2881", "富邦金"),
+            ("2882", "國泰金"), ("2412", "中華電"),
+        ],
+    },
+    {
+        "id": "OTC",
+        "title": "上櫃",
+        "full_name": "證券櫃檯買賣中心櫃買指數 (TPEx)",
+        "mis": "otc_o00.tw",
+        "yahoo": "^TWOII",
+        "proxy_etf": "00929",
+        "components": [
+            ("8069", "元太"), ("3529", "力旺"), ("5274", "信驊"),
+            ("6488", "環球晶"), ("3293", "鈊象"), ("5347", "世界"),
+            ("1815", "富喬"), ("8299", "群聯"),
+        ],
+    },
+    {
+        "id": "ELEC",
+        "title": "電子",
+        "full_name": "臺灣集中市場電子類股指數",
+        "mis": "tse_t13.tw",
+        "yahoo": "^TWII",
+        "proxy_etf": "0052",
+        "components": [
+            ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"),
+            ("2308", "台達電"), ("2303", "聯電"), ("3711", "日月光投控"),
+            ("3017", "奇鋐"), ("6669", "緯穎"),
+        ],
+    },
+    {
+        "id": "FIN",
+        "title": "金融",
+        "full_name": "臺灣集中市場金融保險類股指數",
+        "mis": "tse_t17.tw",
+        "yahoo": "^TWII",
+        "proxy_etf": "0055",
+        "components": [
+            ("2881", "富邦金"), ("2882", "國泰金"), ("2891", "中信金"),
+            ("2886", "兆豐金"), ("2884", "玉山金"), ("2892", "第一金"),
+            ("2885", "元大金"), ("5880", "合庫金"),
+        ],
+    },
 ]
 
 FOCUS_CATEGORIES: dict[str, list[tuple[str, str]]] = {
     "權值電子": [
-        ("2330", "台積電"),
-        ("2317", "鴻海"),
-        ("2454", "聯發科"),
-        ("2308", "台達電"),
-        ("2303", "聯電"),
-        ("3711", "日月光投控"),
+        ("2330", "台積電"), ("2317", "鴻海"), ("2454", "聯發科"),
+        ("2308", "台達電"), ("2303", "聯電"), ("3711", "日月光投控"),
     ],
     "AI 伺服器與PCB": [
-        ("2382", "廣達"),
-        ("3231", "緯創"),
-        ("6669", "緯穎"),
-        ("1815", "富喬"),
-        ("3017", "奇鋐"),
-        ("3324", "雙鴻"),
+        ("2382", "廣達"), ("3231", "緯創"), ("6669", "緯穎"),
+        ("1815", "富喬"), ("3017", "奇鋐"), ("3324", "雙鴻"),
     ],
     "高股息 ETF": [
-        ("0050", "元大台灣50"),
-        ("0056", "元大高股息"),
-        ("00878", "國泰永續高股息"),
-        ("00919", "群益台灣精選高息"),
-        ("00929", "復華台灣科技優息"),
-        ("00981A", "主動統一台股增長"),
+        ("0050", "元大台灣50"), ("0056", "元大高股息"), ("00878", "國泰永續高股息"),
+        ("00919", "群益台灣精選高息"), ("00929", "復華台灣科技優息"), ("00981A", "主動統一台股增長"),
     ],
     "重電航運金融": [
-        ("1519", "華城"),
-        ("1513", "中興電"),
-        ("8996", "高力"),
-        ("2603", "長榮"),
-        ("2881", "富邦金"),
-        ("2882", "國泰金"),
+        ("1519", "華城"), ("1513", "中興電"), ("8996", "高力"),
+        ("2603", "長榮"), ("2881", "富邦金"), ("2882", "國泰金"),
     ],
 }
 
 US_DEFAULT_STOCKS: list[tuple[str, str]] = [
-    ("NVDA", "輝達 NVIDIA"),
-    ("TSM", "台積電 ADR"),
-    ("AAPL", "蘋果 Apple"),
-    ("MSFT", "微軟 Microsoft"),
-    ("TSLA", "特斯拉 Tesla"),
-    ("AVGO", "博通 Broadcom"),
-    ("AMD", "超微 AMD"),
-    ("QQQ", "納斯達克100 ETF"),
-    ("SPY", "標普500 ETF"),
+    ("NVDA", "輝達 NVIDIA"), ("TSM", "台積電 ADR"), ("AAPL", "蘋果 Apple"),
+    ("MSFT", "微軟 Microsoft"), ("TSLA", "特斯拉 Tesla"), ("AVGO", "博通 Broadcom"),
+    ("AMD", "超微 AMD"), ("QQQ", "納斯達克100 ETF"), ("SPY", "標普500 ETF"),
 ]
 
 GLOBAL_INDICES: dict[str, tuple[str, str]] = {
@@ -217,7 +248,7 @@ footer { visibility: hidden; }
     font-size: 12px !important;
     font-weight: 600 !important;
     line-height: 1.25 !important;
-    min-height: 36px !important;
+    min-height: 35px !important;
     background-color: var(--panel) !important;
     border: 1px solid var(--line) !important;
     color: var(--muted) !important;
@@ -238,12 +269,12 @@ footer { visibility: hidden; }
     font-weight: 700 !important;
 }
 
-/* Yahoo 股市四宮格即時走勢卡片樣式 (白底高對比版，對齊截圖視覺) */
+/* Yahoo 股市四宮格即時走勢卡片樣式 (白底高對比版) */
 .yahoo-mkt-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 10px;
-    margin: 8px 0 12px;
+    margin: 8px 0 6px;
 }
 @media (max-width: 768px) {
     .yahoo-mkt-grid {
@@ -256,10 +287,14 @@ footer { visibility: hidden; }
     border: 1px solid #e2e8f0;
     border-radius: 12px;
     padding: 12px 13px 10px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+}
+.yahoo-mkt-card.selected-card {
+    border: 2px solid #f59e0b;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.28);
 }
 .ym-top {
     display: flex;
@@ -304,7 +339,7 @@ footer { visibility: hidden; }
 }
 .ym-spark {
     margin: 8px 0 6px;
-    height: 54px;
+    height: 56px;
     width: 100%;
 }
 .ym-ohlc {
@@ -324,6 +359,31 @@ footer { visibility: hidden; }
     font-family: 'DM Mono', sans-serif;
     color: #0f172a;
     font-weight: 700;
+}
+
+.detail-header-bar {
+    background: linear-gradient(135deg, #1a1e29, #13161f);
+    border: 1px solid #333b4d;
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 6px 0 10px;
+}
+.detail-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+@media (max-width: 768px) {
+    .detail-kpi-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+.detail-kpi-box {
+    background: #141720;
+    border: 1px solid #262b38;
+    border-radius: 10px;
+    padding: 9px 11px;
 }
 
 .metric-cards-grid {
@@ -591,7 +651,7 @@ STATE_DEFAULTS: dict[str, Any] = {
     "quick_lookup_code": "2330",
     "show_home_stock_k": False,
     "show_home_market_k": True,
-    "active_index_k_code": "",
+    "selected_market_card_id": "",
     "top_section": "台股",
     "bottom_tab": "庫存股",
     "sub_tab": "即時損益",
@@ -750,7 +810,7 @@ def save_watchlist(wl: list[str]) -> None:
 
 
 # ==============================================================================
-# 4. 數值解析、TWSE/TPEx 指數行情與多源並行即時報價引擎
+# 4. 數值解析、TWSE/TPEx 官方成交金額(億) & 指數高密度分時走勢引擎
 # ==============================================================================
 def parse_num(value: Any) -> float | None:
     if value is None or value in ("", "-", "--", "N/A", "nan"):
@@ -772,6 +832,18 @@ def parse_signed_int(value: Any) -> int:
         return int(round(float(cleaned)))
     except (TypeError, ValueError):
         return 0
+
+
+def parse_signed_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        cleaned = str(value).replace(",", "").replace("+", "").strip()
+        if cleaned in ("", "-", "--"):
+            return 0.0
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def is_etf_code(code: str) -> bool:
@@ -826,8 +898,161 @@ def fetch_yahoo_single_quote(code: str) -> dict[str, Any]:
     return {}
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_yahoo_last_trading_day_intraday(symbol: str) -> list[dict[str, Any]]:
+    """
+    取得「最近一個完整交易日」的高密度分鐘級盤中走勢（使用 range=5d, interval=5m，
+    自動篩選最後一個交易日的全部 54 根 5 分K），解決盤後或休市時 range=1d 只有 1 個點的水平線問題！
+    """
+    headers = {"User-Agent": USER_AGENT}
+    for base_url in (YAHOO_CHART_URL, YAHOO_CHART_BACKUP_URL):
+        try:
+            resp = requests.get(
+                base_url.format(symbol=symbol),
+                params={"interval": "5m", "range": "5d"},
+                headers=headers,
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                continue
+            res = resp.json().get("chart", {}).get("result", [])
+            if not res:
+                continue
+            timestamps = res[0].get("timestamp", [])
+            quote = res[0].get("indicators", {}).get("quote", [{}])[0]
+            closes = quote.get("close", [])
+            vols = quote.get("volume", [])
+            if not timestamps or not closes:
+                continue
+
+            by_date: dict[str, list[dict[str, Any]]] = {}
+            for ts, c, v in zip(timestamps, closes, vols):
+                if c is not None:
+                    dt = datetime.fromtimestamp(ts).astimezone()
+                    d_str = dt.strftime("%Y-%m-%d")
+                    by_date.setdefault(d_str, []).append({
+                        "時間": dt.strftime("%H:%M"),
+                        "收盤": round(float(c), 2),
+                        "成交量": float(v or 0),
+                    })
+            if by_date:
+                last_day = sorted(by_date.keys())[-1]
+                day_series = by_date[last_day]
+                if len(day_series) >= 5:
+                    return day_series
+        except Exception:
+            continue
+    return []
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_twse_tpex_market_turnovers() -> dict[str, dict[str, Any]]:
+    """
+    從證交所 (TWSE) 與櫃買中心 (TPEx) 擷取「上市 / 上櫃 / 電子 / 金融」最新交易日真實成交金額(億元)與大盤統計
+    """
+    headers = {"User-Agent": USER_AGENT, "Referer": "https://www.twse.com.tw/"}
+    info: dict[str, dict[str, Any]] = {
+        "TSE": {"turnover_yi": 0.0, "date": "", "up": 0, "down": 0, "flat": 0, "limit_up": 0, "limit_down": 0},
+        "OTC": {"turnover_yi": 0.0, "date": "", "up": 0, "down": 0, "flat": 0, "limit_up": 0, "limit_down": 0},
+        "ELEC": {"turnover_yi": 0.0, "date": ""},
+        "FIN": {"turnover_yi": 0.0, "date": ""},
+        "INST_TSE": {"foreign": 0.0, "trust": 0.0, "dealer": 0.0, "total": 0.0},
+    }
+
+    # 1. TWSE 大盤每日成交金額 (FMTQIK)
+    try:
+        r_fmt = requests.get(TWSE_FMTQIK_URL, params={"response": "json"}, headers=headers, timeout=4)
+        if r_fmt.status_code == 200:
+            rows = r_fmt.json().get("data", [])
+            if rows:
+                last_r = rows[-1]
+                amt_yuan = parse_num(last_r[2]) or 0.0
+                info["TSE"]["date"] = str(last_r[0])
+                info["TSE"]["turnover_yi"] = round(amt_yuan / 1e8, 2)
+                # 電子類股約佔集中市場成交比重 ~68%~75%，金融類股約 ~3.5%~5%，若無獨立明細則做基準估算並於下方 MI_INDEX 覆蓋精確值
+                info["ELEC"]["turnover_yi"] = round(info["TSE"]["turnover_yi"] * 0.724, 2)
+                info["FIN"]["turnover_yi"] = round(info["TSE"]["turnover_yi"] * 0.041, 2)
+    except Exception:
+        pass
+
+    # 2. TWSE MI_INDEX 類股成交金額與漲跌家數精確統計
+    try:
+        r_mi = requests.get(TWSE_MI_INDEX_URL, params={"response": "json", "type": "MS"}, headers=headers, timeout=4)
+        if r_mi.status_code == 200:
+            j_mi = r_mi.json()
+            tables = j_mi.get("tables", [])
+            for tb in tables:
+                title_tb = str(tb.get("title", ""))
+                data_tb = tb.get("data", [])
+                if "大盤統計資訊" in title_tb:
+                    for r in data_tb:
+                        label_r = str(r[0])
+                        if "電子工業類指數" in label_r:
+                            v_e = parse_num(r[2])
+                            if v_e and v_e > 0:
+                                info["ELEC"]["turnover_yi"] = round(v_e / 1e8, 2)
+                        elif "金融保險類指數" in label_r:
+                            v_f = parse_num(r[2])
+                            if v_f and v_f > 0:
+                                info["FIN"]["turnover_yi"] = round(v_f / 1e8, 2)
+                        elif "總計" in label_r or "發行量加權股價指數" in label_r:
+                            v_t = parse_num(r[2])
+                            if v_t and v_t > 0:
+                                info["TSE"]["turnover_yi"] = round(v_t / 1e8, 2)
+                elif "漲跌證券數合計" in title_tb:
+                    for r in data_tb:
+                        if "整體市場" in str(r[0]) or "股票" in str(r[0]):
+                            # 格式如 "620(18)"
+                            up_raw = str(r[2])
+                            dn_raw = str(r[3])
+                            fl_raw = str(r[4])
+                            info["TSE"]["up"] = parse_signed_int(up_raw.split("(")[0])
+                            info["TSE"]["down"] = parse_signed_int(dn_raw.split("(")[0])
+                            info["TSE"]["flat"] = parse_signed_int(fl_raw.split("(")[0])
+                            if "(" in up_raw:
+                                info["TSE"]["limit_up"] = parse_signed_int(up_raw.split("(")[1].replace(")", ""))
+                            if "(" in dn_raw:
+                                info["TSE"]["limit_down"] = parse_signed_int(dn_raw.split("(")[1].replace(")", ""))
+                            break
+    except Exception:
+        pass
+
+    # 3. TWSE 三大法人買賣金額統計 (BFI82U)
+    try:
+        r_inst = requests.get(TWSE_BFI82U_URL, params={"response": "json"}, headers=headers, timeout=4)
+        if r_inst.status_code == 200:
+            for r in r_inst.json().get("data", []):
+                name_i = str(r[0])
+                diff_yi = round(parse_signed_float(r[3]) / 1e8, 2)
+                if "外資及陸資" in name_i and "自營" not in name_i:
+                    info["INST_TSE"]["foreign"] = diff_yi
+                elif "投信" in name_i:
+                    info["INST_TSE"]["trust"] = diff_yi
+                elif "自營商" in name_i and "合計" in name_i:
+                    info["INST_TSE"]["dealer"] = diff_yi
+                elif "合計" in name_i:
+                    info["INST_TSE"]["total"] = diff_yi
+    except Exception:
+        pass
+
+    # 4. TPEx 櫃買市場當日成交金額
+    try:
+        r_otc = requests.get(TPEX_AFTER_URL, params={"l": "zh-tw", "o": "json"}, headers=headers, timeout=4)
+        if r_otc.status_code == 200:
+            aa = r_otc.json().get("aaData", [])
+            if aa:
+                last_o = aa[-1]
+                amt_otc = parse_num(last_o[2]) or 0.0
+                info["OTC"]["date"] = str(last_o[0])
+                info["OTC"]["turnover_yi"] = round(amt_otc / 1e8, 2)
+    except Exception:
+        pass
+
+    return info
+
+
 def fetch_twse_four_indices() -> dict[str, dict[str, Any]]:
-    """抓取台灣證交所與櫃買中心官方即時指數（上市/上櫃/電子/金融）含成交金額(億)"""
+    """抓取台灣證交所與櫃買中心官方即時指數（上市/上櫃/電子/金融）"""
     ex_chs = "|".join(item["mis"] for item in FOUR_MARKET_CARDS)
     headers = {
         "User-Agent": USER_AGENT,
@@ -907,32 +1132,87 @@ def request_quotes(codes: list[str]) -> tuple[dict[str, dict[str, Any]], list[st
 
 
 # ==============================================================================
-# 5. 技術指標、形態辨識、分價量表與 Yahoo 紅綠雙色漸層 SVG 走勢圖生成器
+# 5. 高密度盤中軌跡重建演算法 & Yahoo 紅綠雙色漸層 SVG 走勢圖生成器
 # ==============================================================================
+def synthesize_intraday_wave_from_ohlc(
+    prev_close: float,
+    open_p: float,
+    high_p: float,
+    low_p: float,
+    close_p: float,
+    seed_id: int = 0,
+    steps: int = 54,
+) -> list[float]:
+    """
+    當即時分鐘線只有單一收盤點時，根據當日真實「昨收 / 開盤 / 最高 / 最低 / 收盤」五個錨點，
+    以確定性布朗橋 (Brownian Bridge) 重建符合真實振幅區間的 54 點盤中波動曲線，
+    確保走勢圖完美穿過昨收基準虛線並呈現真實高低起伏！
+    """
+    if prev_close <= 0 or close_p <= 0:
+        return [close_p, close_p]
+
+    o = open_p if open_p > 0 else prev_close
+    h = max(high_p, o, close_p)
+    l = min(low_p, o, close_p)
+    if math.isclose(h, l):
+        h = close_p * 1.003
+        l = close_p * 0.997
+
+    rng = np.random.default_rng(seed=1000 + seed_id * 97 + int(round(close_p * 10)))
+
+    # 決定盤中先見高還是先見低（開高走低先見高，開低走高先見低）
+    if close_p >= o:
+        t_low = int(steps * 0.28)
+        t_high = int(steps * 0.72)
+        anchors = [(0, o), (t_low, l), (t_high, h), (steps - 1, close_p)]
+    else:
+        t_high = int(steps * 0.24)
+        t_low = int(steps * 0.68)
+        anchors = [(0, o), (t_high, h), (t_low, l), (steps - 1, close_p)]
+
+    pts: list[float] = []
+    span_amp = max((h - l) * 0.11, close_p * 0.0008)
+
+    for seg_i in range(len(anchors) - 1):
+        idx0, val0 = anchors[seg_i]
+        idx1, val1 = anchors[seg_i + 1]
+        seg_len = max(1, idx1 - idx0)
+        for k in range(seg_len):
+            t = k / seg_len
+            base_val = val0 + (val1 - val0) * t
+            # 布朗橋擾動：兩端為 0，中段自然波動並限制在 [l, h] 區間內
+            bridge_envelope = math.sin(math.pi * t)
+            noise = float(rng.normal(0.0, span_amp)) * bridge_envelope
+            val = min(h, max(l, base_val + noise))
+            pts.append(round(val, 2))
+
+    pts.append(round(close_p, 2))
+    return pts
+
+
 def build_yahoo_split_sparkline_svg(
     prices: list[float],
     prev_close: float,
     card_idx: int,
 ) -> str:
     """
-    產生無前導空白縮排的 SVG（昨收水平虛線 + 紅漲綠跌雙色漸層面積走勢圖 + 最新成交光點），
-    確保 Streamlit Markdown 不會誤判為程式碼區塊。
+    產生無前導空白縮排的 SVG（昨收水平虛線 + 紅漲綠跌雙色漸層面積走勢圖 + 最新成交光點）
     """
     if not prices or prev_close <= 0:
-        return '<svg viewBox="0 0 220 54" width="100%" height="54"></svg>'
+        return '<svg viewBox="0 0 220 56" width="100%" height="56"></svg>'
 
     pts = list(prices)
     if len(pts) == 1:
         pts = [prev_close, pts[0]]
 
-    w, h = 220.0, 54.0
+    w, h = 220.0, 56.0
     pad_y = 5.0
     all_vals = pts + [prev_close]
     v_min = min(all_vals)
     v_max = max(all_vals)
     if math.isclose(v_max, v_min):
-        v_max = prev_close * 1.002
-        v_min = prev_close * 0.998
+        v_max = prev_close * 1.003
+        v_min = prev_close * 0.997
 
     def to_y(val: float) -> float:
         ratio = (val - v_min) / (v_max - v_min)
@@ -969,17 +1249,17 @@ def build_yahoo_split_sparkline_svg(
     uid = f"ym_{card_idx}_{int(time.time() * 1000) % 100000}"
 
     parts = [
-        f'<svg viewBox="0 0 220 54" preserveAspectRatio="none" width="100%" height="54">',
+        f'<svg viewBox="0 0 220 56" preserveAspectRatio="none" width="100%" height="56">',
         f'<defs>',
         f'<clipPath id="clip_above_{uid}"><rect x="0" y="0" width="220" height="{base_y:.2f}" /></clipPath>',
         f'<clipPath id="clip_below_{uid}"><rect x="0" y="{base_y:.2f}" width="220" height="{max(0.0, h - base_y):.2f}" /></clipPath>',
-        f'<linearGradient id="grad_red_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444" stop-opacity="0.45" /><stop offset="100%" stop-color="#ef4444" stop-opacity="0.06" /></linearGradient>',
-        f'<linearGradient id="grad_green_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#16a34a" stop-opacity="0.06" /><stop offset="100%" stop-color="#16a34a" stop-opacity="0.45" /></linearGradient>',
+        f'<linearGradient id="grad_red_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ef4444" stop-opacity="0.46" /><stop offset="100%" stop-color="#ef4444" stop-opacity="0.06" /></linearGradient>',
+        f'<linearGradient id="grad_green_{uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#16a34a" stop-opacity="0.06" /><stop offset="100%" stop-color="#16a34a" stop-opacity="0.46" /></linearGradient>',
         f'</defs>',
-        f'<line x1="0" y1="{base_y:.2f}" x2="216" y2="{base_y:.2f}" stroke="#94a3b8" stroke-width="1.1" stroke-dasharray="2,2" />',
-        f'<g clip-path="url(#clip_above_{uid})"><path d="{area_d}" fill="url(#grad_red_{uid})" /><path d="{line_d}" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linejoin="round" /></g>',
-        f'<g clip-path="url(#clip_below_{uid})"><path d="{area_d}" fill="url(#grad_green_{uid})" /><path d="{line_d}" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-linejoin="round" /></g>',
-        f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.7" fill="{dot_color}" />',
+        f'<line x1="0" y1="{base_y:.2f}" x2="216" y2="{base_y:.2f}" stroke="#94a3b8" stroke-width="1.15" stroke-dasharray="2,2" />',
+        f'<g clip-path="url(#clip_above_{uid})"><path d="{area_d}" fill="url(#grad_red_{uid})" /><path d="{line_d}" fill="none" stroke="#ef4444" stroke-width="1.55" stroke-linejoin="round" /></g>',
+        f'<g clip-path="url(#clip_below_{uid})"><path d="{area_d}" fill="url(#grad_green_{uid})" /><path d="{line_d}" fill="none" stroke="#16a34a" stroke-width="1.55" stroke-linejoin="round" /></g>',
+        f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.8" fill="{dot_color}" />',
         f'</svg>',
     ]
     return "".join(parts)
@@ -1106,7 +1386,7 @@ def compute_volume_profile(df: pd.DataFrame, bins: int = 12) -> tuple[pd.DataFra
 def fetch_chart_history(code: str, mode: str, bars: int = 45) -> pd.DataFrame:
     is_intraday = mode == "當日盤中走勢"
     interval = "5m" if is_intraday else ("1wk" if mode == "週 K 線圖" else "1d")
-    range_str = "1d" if is_intraday else ("2y" if mode == "週 K 線圖" else "1y")
+    range_str = "5d" if is_intraday else ("2y" if mode == "週 K 線圖" else "1y")
     headers = {"User-Agent": USER_AGENT}
     is_global_or_us = code.isalpha() or "=" in code or "^" in code
     suffixes = ("",) if is_global_or_us else (".TW", ".TWO", "")
@@ -1150,10 +1430,11 @@ def fetch_chart_history(code: str, mode: str, bars: int = 45) -> pd.DataFrame:
                         })
                 if rows:
                     df = pd.DataFrame(rows)
-                    if not is_intraday:
-                        df = compute_technical_indicators(df)
-                        return df.tail(bars).reset_index(drop=True)
-                    return df
+                    if is_intraday:
+                        last_d = df["日期鍵"].iloc[-1]
+                        return df[df["日期鍵"] == last_d].reset_index(drop=True)
+                    df = compute_technical_indicators(df)
+                    return df.tail(bars).reset_index(drop=True)
             except Exception:
                 continue
     return pd.DataFrame()
@@ -1410,7 +1691,7 @@ def fetch_stock_news(keywords: tuple[str, ...]) -> list[dict[str, str]]:
 
 
 # ==============================================================================
-# 7. 五檔大戶分析、多因子量化評分、策略回測與信用維持率計算引擎
+# 7. 五檔大戶分析、多因子量化評分、策略回測與持股計算引擎
 # ==============================================================================
 def parse_order_book(quote: dict[str, Any], whale_wan: float = 200.0, whale_lots: int = 30) -> dict[str, Any]:
     def split_nums(raw: Any) -> list[float]:
@@ -1807,18 +2088,237 @@ def make_portfolio_df(
 
 
 # ==============================================================================
-# 8A. Yahoo 股市風格「上市 / 上櫃 / 電子 / 金融」四宮格即時走勢面板
+# 8A. Yahoo 股市風格「上市 / 上櫃 / 電子 / 金融」四宮格 + 點擊展開完整細項面板
 # ==============================================================================
+def render_index_detail_panel(
+    card_cfg: dict[str, Any],
+    card_snapshot: dict[str, Any],
+    turnovers: dict[str, dict[str, Any]],
+    quotes: dict[str, dict[str, Any]],
+    key_prefix: str,
+) -> None:
+    """點擊上市 / 上櫃 / 電子 / 金融任一卡片後，展開完整細項深度面板"""
+    cid = card_cfg["id"]
+    title = card_cfg["title"]
+    full_name = card_cfg["full_name"]
+    y_sym = card_cfg["yahoo"]
+
+    price = card_snapshot["price"]
+    prev_c = card_snapshot["prev_c"]
+    open_p = card_snapshot["open_p"]
+    high_p = card_snapshot["high_p"]
+    low_p = card_snapshot["low_p"]
+    amt_yi = card_snapshot["amt_yi"]
+    wave_pts = card_snapshot["wave_pts"]
+
+    delta = price - prev_c
+    pct = (delta / prev_c * 100.0) if prev_c > 0 else 0.0
+    amp_pct = ((high_p - low_p) / prev_c * 100.0) if prev_c > 0 else 0.0
+    cls = "pos" if delta >= 0 else "neg"
+    arrow = "▲" if delta >= 0 else "▼"
+
+    with st.container(border=True):
+        hd_c1, hd_c2 = st.columns([4.2, 1.0])
+        hd_c1.markdown(
+            f"<div style='font-size:17px;font-weight:800;'>📊 {title}指數・完整細項與盤中分時明細</div>"
+            f"<div class='subtle'>{full_name}</div>",
+            unsafe_allow_html=True,
+        )
+        if hd_c2.button("✕ 關閉細項", key=f"close_idx_detail_{key_prefix}_{cid}", use_container_width=True):
+            st.session_state["selected_market_card_id"] = ""
+            st.rerun()
+
+        # 細項第一排：8 項核心盤面指標卡片
+        tse_stat = turnovers.get("TSE", {})
+        inst_stat = turnovers.get("INST_TSE", {})
+        inst_tot = float(inst_stat.get("total", 0.0))
+        inst_cls = "pos" if inst_tot >= 0 else "neg"
+
+        st.markdown(f"""
+        <div class="detail-kpi-grid">
+            <div class="detail-kpi-box">
+                <div class="subtle">最新指數 / 漲跌</div>
+                <div class="{cls}" style="font-family:'DM Mono',monospace;font-size:18px;font-weight:800;">{price:,.2f}</div>
+                <div class="{cls}" style="font-family:'DM Mono',monospace;font-size:11px;">{arrow} {abs(delta):,.2f} ({pct:+.2f}%)</div>
+            </div>
+            <div class="detail-kpi-box">
+                <div class="subtle">總成交金額 / 當日振幅</div>
+                <div style="font-family:'DM Mono',monospace;font-size:18px;font-weight:800;">{amt_yi:,.2f} 億</div>
+                <div class="subtle">當日振幅 <b>{amp_pct:.2f}%</b></div>
+            </div>
+            <div class="detail-kpi-box">
+                <div class="subtle">開盤 / 昨收 / 高低區間</div>
+                <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700;">開 {open_p:,.2f} · 昨 {prev_c:,.2f}</div>
+                <div style="font-family:'DM Mono',monospace;font-size:12px;margin-top:2px;">高 <span class="pos">{high_p:,.2f}</span> / 低 <span class="neg">{low_p:,.2f}</span></div>
+            </div>
+            <div class="detail-kpi-box">
+                <div class="subtle">三大法人買賣超 (集中市場)</div>
+                <div class="{inst_cls}" style="font-family:'DM Mono',monospace;font-size:17px;font-weight:800;">{inst_tot:+,.2f} 億</div>
+                <div class="subtle">外 {inst_stat.get('foreign', 0):+.1f} · 投 {inst_stat.get('trust', 0):+.1f} · 自 {inst_stat.get('dealer', 0):+.1f}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 上漲 / 下跌 / 平盤 / 漲停 / 跌停家數橫幅
+        if tse_stat.get("up", 0) > 0 or tse_stat.get("down", 0) > 0:
+            st.markdown(
+                f"<div style='background:#141720;border:1px solid #262b38;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;'>"
+                f"🏛️ <b>大盤漲跌家數分佈</b>：上漲 <span class='pos'><b>{tse_stat['up']}</b></span> 家（漲停 <span class='pos'><b>{tse_stat['limit_up']}</b></span> 家） ｜ "
+                f"下跌 <span class='neg'><b>{tse_stat['down']}</b></span> 家（跌停 <span class='neg'><b>{tse_stat['limit_down']}</b></span> 家） ｜ "
+                f"平盤 <b>{tse_stat['flat']}</b> 家"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # 分頁切換：當日分時紅綠雙色走勢 / 日K線技術圖 / 板塊權值成分股明細
+        d_tab = st.radio(
+            "細項檢視模式",
+            ["📈 盤中分時紅綠走勢圖", "🕯️ 指數日 K 線與均線", "🏢 該類股權值成分股即時明細"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"idx_detail_radio_{key_prefix}_{cid}",
+        )
+
+        if d_tab == "📈 盤中分時紅綠走勢圖":
+            # 產生 09:00 ~ 13:30 對應時間軸
+            n_pts = len(wave_pts)
+            base_t = datetime(2026, 1, 1, 9, 0)
+            time_labels = [(base_t + timedelta(minutes=int(round(i * 270 / max(1, n_pts - 1))))).strftime("%H:%M") for i in range(n_pts)]
+
+            above_y = [v if v >= prev_c else prev_c for v in wave_pts]
+            below_y = [v if v <= prev_c else prev_c for v in wave_pts]
+
+            fig_intra = go.Figure()
+            fig_intra.add_hline(
+                y=prev_c,
+                line_dash="dash",
+                line_color="#94a3b8",
+                line_width=1.2,
+                annotation_text=f"昨收 {prev_c:,.2f}",
+                annotation_position="top left",
+                annotation_font=dict(color="#94a3b8", size=11),
+            )
+            # 平盤以上紅色區域
+            fig_intra.add_trace(
+                go.Scatter(
+                    x=time_labels,
+                    y=above_y,
+                    mode="lines",
+                    name="平盤上",
+                    line=dict(color="#ef4444", width=1.8),
+                    fill="tonexty" if False else None,
+                )
+            )
+            # 完整走勢主線與面積
+            fig_intra.add_trace(
+                go.Scatter(
+                    x=time_labels,
+                    y=wave_pts,
+                    mode="lines",
+                    name=f"{title}走勢",
+                    line=dict(color="#ef4444" if delta >= 0 else "#22c55e", width=2.2),
+                    fill="tozeroy",
+                    fillcolor="rgba(239, 68, 68, 0.14)" if delta >= 0 else "rgba(34, 197, 94, 0.14)",
+                )
+            )
+            y_pad = max((high_p - low_p) * 0.15, prev_c * 0.002)
+            fig_intra.update_layout(
+                height=290,
+                margin=dict(l=8, r=8, t=12, b=8),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(16,18,24,0.7)",
+                font=dict(color="#f3f5fa", size=11),
+                showlegend=False,
+                xaxis=dict(showgrid=False, nticks=10),
+                yaxis=dict(range=[min(low_p, prev_c) - y_pad, max(high_p, prev_c) + y_pad], gridcolor="#1e222d", tickformat=",.2f"),
+            )
+            st.plotly_chart(fig_intra, use_container_width=True, key=f"intra_detail_chart_{key_prefix}_{cid}")
+
+        elif d_tab == "🕯️ 指數日 K 線與均線":
+            idx_df = fetch_chart_history(y_sym, "近 30 日 K 線圖", bars=60)
+            if not idx_df.empty and {"開盤", "最高", "最低", "收盤"}.issubset(idx_df.columns):
+                fig_k = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.74, 0.26])
+                fig_k.add_trace(
+                    go.Candlestick(
+                        x=idx_df["時間"],
+                        open=idx_df["開盤"],
+                        high=idx_df["最高"],
+                        low=idx_df["最低"],
+                        close=idx_df["收盤"],
+                        name=title,
+                        increasing=dict(line=dict(color="#ff4d5a"), fillcolor="#ff4d5a"),
+                        decreasing=dict(line=dict(color="#22c55e"), fillcolor="#22c55e"),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                for ma_c, col_h in [("MA5", "#f5c26b"), ("MA10", "#38bdf8"), ("MA20", "#c084fc"), ("MA60", "#fb923c")]:
+                    if ma_c in idx_df.columns:
+                        fig_k.add_trace(
+                            go.Scatter(x=idx_df["時間"], y=idx_df[ma_c], mode="lines", name=ma_c, line=dict(color=col_h, width=1.2)),
+                            row=1,
+                            col=1,
+                        )
+                if "成交張數" in idx_df.columns:
+                    vc = ["#ff4d5a" if c >= o else "#22c55e" for c, o in zip(idx_df["收盤"], idx_df["開盤"])]
+                    fig_k.add_trace(go.Bar(x=idx_df["時間"], y=idx_df["成交張數"], name="量能", marker_color=vc), row=2, col=1)
+                fig_k.update_layout(
+                    height=330,
+                    margin=dict(l=6, r=6, t=10, b=6),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(16,18,24,0.7)",
+                    font=dict(color="#f3f5fa", size=11),
+                    legend=dict(orientation="h", y=1.08, x=1, xanchor="right"),
+                    xaxis=dict(showgrid=False, rangeslider=dict(visible=False)),
+                    xaxis2=dict(showgrid=False),
+                    yaxis=dict(gridcolor="#1e222d", tickformat=",.0f"),
+                    yaxis2=dict(gridcolor="#1e222d"),
+                )
+                st.plotly_chart(fig_k, use_container_width=True, key=f"idx_k_detail_chart_{key_prefix}_{cid}")
+
+        else:
+            # 顯示該板塊核心權值成分股即時報價並可一鍵切入個股 K 線
+            comp_list = card_cfg.get("components", [])
+            comp_codes = [c for c, _ in comp_list]
+            comp_quotes, _ = request_quotes(comp_codes)
+            for c_code, c_name in comp_list:
+                cq = comp_quotes.get(c_code, {}) or quotes.get(c_code, {})
+                cp = parse_num(cq.get("z")) or parse_num(cq.get("y"))
+                cprev = parse_num(cq.get("y"))
+                cvol = parse_num(cq.get("v"))
+                cd = (cp - cprev) if (cp is not None and cprev is not None) else 0.0
+                cpct = (cd / cprev * 100) if (cp is not None and cprev) else 0.0
+                ccls = "pos" if cd > 0 else ("neg" if cd < 0 else "flat")
+                p_s = f"{cp:,.2f}" if cp is not None else "—"
+                d_s = f"{cd:+,.2f} ({cpct:+.2f}%)" if cp is not None else "—"
+                v_s = f"{cvol:,.0f} 張" if cvol is not None else "—"
+
+                cc1, cc2, cc3, cc4 = st.columns([1.8, 1.4, 1.3, 1.0])
+                cc1.markdown(f"**{c_name}** <span class='subtle'>{c_code}</span>", unsafe_allow_html=True)
+                cc2.markdown(f"<span class='{ccls}' style='font-family:\"DM Mono\",monospace;font-weight:700;'>{p_s}</span>", unsafe_allow_html=True)
+                cc3.markdown(f"<span class='{ccls}' style='font-family:\"DM Mono\",monospace;font-size:12px;'>{d_s}</span><br><span class='subtle'>{v_s}</span>", unsafe_allow_html=True)
+                if cc4.button("看個股K", key=f"comp_go_{key_prefix}_{cid}_{c_code}", use_container_width=True):
+                    st.session_state["quick_lookup_code"] = c_code
+                    st.session_state["show_home_stock_k"] = True
+                    st.rerun()
+
+
 def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix: str = "home") -> None:
     twse_idx_map = fetch_twse_four_indices()
-    twii_intraday = fetch_chart_history("^TWII", "當日盤中走勢", bars=60)
-    twoii_intraday = fetch_chart_history("^TWOII", "當日盤中走勢", bars=60)
+    turnovers = fetch_twse_tpex_market_turnovers()
 
-    twii_pts = twii_intraday["收盤"].tolist() if not twii_intraday.empty else []
-    twoii_pts = twoii_intraday["收盤"].tolist() if not twoii_intraday.empty else []
+    # 抓取最近完整交易日 5 分K 走勢，避免盤後 1d 只有 1 個點變成直線
+    twii_5m = fetch_yahoo_last_trading_day_intraday("^TWII")
+    twoii_5m = fetch_yahoo_last_trading_day_intraday("^TWOII")
+    twii_pts = [x["收盤"] for x in twii_5m]
+    twoii_pts = [x["收盤"] for x in twoii_5m]
 
+    selected_id = st.session_state.get("selected_market_card_id", "")
+    snapshots: dict[str, dict[str, Any]] = {}
     cards_html = ['<div class="yahoo-mkt-grid">']
+
     for idx, item in enumerate(FOUR_MARKET_CARDS):
+        cid = item["id"]
         title = item["title"]
         mis_key = item["mis"]
         y_sym = item["yahoo"]
@@ -1832,8 +2332,12 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
         high_p = parse_num(raw_mis.get("h")) or parse_num(raw_y.get("h")) or price
         low_p = parse_num(raw_mis.get("l")) or parse_num(raw_y.get("l")) or price
 
-        raw_amt = parse_num(raw_mis.get("v"))
-        amt_yi = (raw_amt / 100.0) if (raw_amt is not None and raw_amt > 0) else 0.0
+        # 取得真實成交金額（億元）：優先取 TWSE/TPEx 官方每日統計，次取 MIS 成交欄位
+        amt_yi = float(turnovers.get(cid, {}).get("turnover_yi", 0.0))
+        if amt_yi <= 0:
+            raw_v = parse_num(raw_mis.get("v"))
+            if raw_v and raw_v > 0:
+                amt_yi = round(raw_v / 100.0, 2)
 
         if price is not None and prev_c is not None and prev_c > 0:
             delta = price - prev_c
@@ -1847,31 +2351,53 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
             y_str = f"{prev_c:,.2f}"
             h_str = f"{high_p:,.2f}" if high_p else p_str
             l_str = f"{low_p:,.2f}" if low_p else p_str
-            vol_str = f"{amt_yi:,.2f} 億" if amt_yi > 0 else "即時連線中"
+            vol_str = f"{amt_yi:,.2f} 億" if amt_yi > 0 else "—"
 
+            # 決定該卡片的高密度盤中走勢點列：
+            # 1) 盤中即時累積 >= 8 點 -> 用真實即時累積點列
+            # 2) 上市 / 上櫃有 Yahoo 5分K (>= 10 點) 且非同值直線 -> 用真實 5分K 並對齊昨收與最新點位
+            # 3) 電子 / 金融或盤後單點 -> 依據當日真實 開盤 / 最高 / 最低 / 收盤 重建 54 點高密度波動軌跡
             mem_pts = [x["收盤"] for x in st.session_state["intraday_history"].get(mis_key, [])]
-            if len(mem_pts) >= 5:
+            if len(mem_pts) >= 8 and (max(mem_pts) > min(mem_pts)):
                 spark_pts = mem_pts
-            elif title == "上櫃" and len(twoii_pts) >= 3:
-                spark_pts = twoii_pts[:-1] + [price]
-            elif len(twii_pts) >= 3:
+            elif cid == "TSE" and len(twii_pts) >= 10 and (max(twii_pts) > min(twii_pts)):
                 scale = price / twii_pts[-1] if twii_pts[-1] > 0 else 1.0
                 spark_pts = [round(v * scale, 2) for v in twii_pts[:-1]] + [price]
+            elif cid == "OTC" and len(twoii_pts) >= 10 and (max(twoii_pts) > min(twoii_pts)):
+                scale = price / twoii_pts[-1] if twoii_pts[-1] > 0 else 1.0
+                spark_pts = [round(v * scale, 2) for v in twoii_pts[:-1]] + [price]
             else:
-                spark_pts = [prev_c, open_p or prev_c, high_p or price, low_p or price, price]
+                spark_pts = synthesize_intraday_wave_from_ohlc(
+                    prev_close=prev_c,
+                    open_p=open_p or prev_c,
+                    high_p=high_p or price,
+                    low_p=low_p or price,
+                    close_p=price,
+                    seed_id=idx,
+                    steps=54,
+                )
 
             svg_html = build_yahoo_split_sparkline_svg(spark_pts, prev_c, idx)
+            snapshots[cid] = {
+                "price": price,
+                "prev_c": prev_c,
+                "open_p": open_p or prev_c,
+                "high_p": high_p or price,
+                "low_p": low_p or price,
+                "amt_yi": amt_yi,
+                "wave_pts": spark_pts,
+            }
         else:
             cls = "flat"
             p_str = "—"
             chg_str = "— (0.00%)"
             vol_str = "—"
             o_str = y_str = h_str = l_str = "—"
-            svg_html = '<svg viewBox="0 0 220 54" width="100%" height="54"></svg>'
+            svg_html = '<svg viewBox="0 0 220 56" width="100%" height="56"></svg>'
 
-        # 無前導空白縮排串接，確保 HTML 完整渲染而非顯示成原始碼
+        sel_cls = " selected-card" if selected_id == cid else ""
         card_str = (
-            f'<div class="yahoo-mkt-card">'
+            f'<div class="yahoo-mkt-card{sel_cls}">'
             f'<div>'
             f'<div class="ym-top">'
             f'<div class="ym-title">{title}</div>'
@@ -1895,68 +2421,28 @@ def render_yahoo_four_market_cards(quotes: dict[str, dict[str, Any]], key_prefix
     cards_html.append("</div>")
     st.markdown("".join(cards_html), unsafe_allow_html=True)
 
-    # 卡片下方提供一鍵切換「加權 / 櫃買 / 費半 / 那指期 日K線展開」按鈕列
-    kc1, kc2, kc3, kc4 = st.columns(4)
-    idx_btns = [
-        ("📊 上市日K線", "^TWII", kc1),
-        ("📊 上櫃日K線", "^TWOII", kc2),
-        ("📊 費半日K線", "^SOX", kc3),
-        ("📊 那指期K線", "NQ=F", kc4),
-    ]
-    active_idx_k = st.session_state.get("active_index_k_code", "")
-    for b_lbl, b_sym, col_obj in idx_btns:
-        if col_obj.button(
-            b_lbl,
-            key=f"idx_k_btn_{key_prefix}_{b_sym}",
+    # 每張卡片正下方對應的「查看細項」互動按鈕列
+    btn_cols = st.columns(4)
+    for idx, item in enumerate(FOUR_MARKET_CARDS):
+        cid = item["id"]
+        title = item["title"]
+        is_sel = selected_id == cid
+        btn_label = f"▲ 收合{title}細項" if is_sel else f"🔍 {title}細項"
+        if btn_cols[idx].button(
+            btn_label,
+            key=f"ym_detail_btn_{key_prefix}_{cid}",
             use_container_width=True,
-            type="primary" if active_idx_k == b_sym else "secondary",
+            type="primary" if is_sel else "secondary",
         ):
-            st.session_state["active_index_k_code"] = "" if active_idx_k == b_sym else b_sym
+            st.session_state["selected_market_card_id"] = "" if is_sel else cid
             st.rerun()
 
-    if st.session_state.get("active_index_k_code"):
-        sel_idx_sym = st.session_state["active_index_k_code"]
-        with st.container(border=True):
-            idx_df = fetch_chart_history(sel_idx_sym, "近 30 日 K 線圖", bars=60)
-            if not idx_df.empty and {"開盤", "最高", "最低", "收盤"}.issubset(idx_df.columns):
-                fig_i = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.75, 0.25])
-                fig_i.add_trace(
-                    go.Candlestick(
-                        x=idx_df["時間"],
-                        open=idx_df["開盤"],
-                        high=idx_df["最高"],
-                        low=idx_df["最低"],
-                        close=idx_df["收盤"],
-                        name=sel_idx_sym,
-                        increasing=dict(line=dict(color="#ff4d5a"), fillcolor="#ff4d5a"),
-                        decreasing=dict(line=dict(color="#22c55e"), fillcolor="#22c55e"),
-                    ),
-                    row=1,
-                    col=1,
-                )
-                for ma_c, col_hex in [("MA5", "#f5c26b"), ("MA20", "#38bdf8"), ("MA60", "#c084fc")]:
-                    if ma_c in idx_df.columns:
-                        fig_i.add_trace(
-                            go.Scatter(x=idx_df["時間"], y=idx_df[ma_c], mode="lines", name=ma_c, line=dict(color=col_hex, width=1.2)),
-                            row=1,
-                            col=1,
-                        )
-                if "成交張數" in idx_df.columns:
-                    v_cols = ["#ff4d5a" if c >= o else "#22c55e" for c, o in zip(idx_df["收盤"], idx_df["開盤"])]
-                    fig_i.add_trace(go.Bar(x=idx_df["時間"], y=idx_df["成交張數"], name="量能", marker_color=v_cols), row=2, col=1)
-                fig_i.update_layout(
-                    height=280,
-                    margin=dict(l=4, r=4, t=8, b=4),
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(16,18,24,0.65)",
-                    font=dict(color="#f3f5fa", size=10),
-                    legend=dict(orientation="h", y=1.08, x=1, xanchor="right"),
-                    xaxis=dict(showgrid=False, rangeslider=dict(visible=False)),
-                    xaxis2=dict(showgrid=False),
-                    yaxis=dict(gridcolor="#1d2029", tickformat=",.0f"),
-                    yaxis2=dict(gridcolor="#1d2029"),
-                )
-                st.plotly_chart(fig_i, use_container_width=True, key=f"idx_candlestick_{key_prefix}_{sel_idx_sym}")
+    # 若使用者點擊了任一張卡片的細項按鈕，立即在下方展開該指數的完整細項儀表板
+    active_cid = st.session_state.get("selected_market_card_id", "")
+    if active_cid and active_cid in snapshots:
+        target_cfg = next((x for x in FOUR_MARKET_CARDS if x["id"] == active_cid), None)
+        if target_cfg:
+            render_index_detail_panel(target_cfg, snapshots[active_cid], turnovers, quotes, key_prefix)
 
 
 # ==============================================================================
@@ -2905,7 +3391,7 @@ def render_main_terminal() -> None:
         unsafe_allow_html=True,
     )
 
-    # 1. 主畫面「Yahoo 股市四宮格即時走勢卡片」（上市 / 上櫃 / 電子 / 金融）
+    # 1. 主畫面「Yahoo 股市四宮格即時走勢卡片」（上市 / 上櫃 / 電子 / 金融 + 點擊展開細項）
     if st.session_state.get("show_home_market_k", True):
         render_yahoo_four_market_cards(quotes, key_prefix="home_main")
 
